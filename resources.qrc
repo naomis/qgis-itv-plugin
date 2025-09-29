@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/plugins/geo_itv" >
+        <file>icon.png</file>
+    </qresource>
+</RCC>
