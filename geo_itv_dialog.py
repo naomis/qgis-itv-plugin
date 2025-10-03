@@ -21,18 +21,24 @@
  *                                                                         *
  ***************************************************************************/
 """
-
-import os
-
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 
+from qgis.core import QgsSettings, QgsProject, QgsVectorFileWriter, QgsVectorLayer
+
+from .utils.file_parser import FileParser
+from .utils.insert_tables import insert_b01_table, insert_b02_table, insert_b03_table, insert_b04_table, insert_c_table
+
+import psycopg2
+
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
+import os
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'geo_itv_dialog_base.ui'))
 
 
 class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
+
     def __init__(self, parent=None):
         """Constructor."""
         super(GeoITVDialog, self).__init__(parent)
@@ -42,3 +48,719 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         # http://qt-project.org/doc/qt-4.8/designer-using-a-ui-file.html
         # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
+
+        #connect buttons
+        self.btTestConnexion.clicked.connect(self.test_connexion)
+        self.btExecute.clicked.connect(self.execute)
+
+    def get_connection_params(self, connexion_name):
+        """Récupère les paramètres de connexion PostgreSQL à partir du nom de la connexion."""
+        settings = QgsSettings()
+        prefix = f"PostgreSQL/connections/{connexion_name}/"
+        return {
+            "dbname": settings.value(prefix + "database", ""),
+            "user": settings.value(prefix + "username", ""),
+            "password": settings.value(prefix + "password", ""),
+            "host": settings.value(prefix + "host", "localhost"),
+            "port": settings.value(prefix + "port", "5432"),
+        }
+
+    def test_connexion(self):
+        """Test the database connection using the selected connection."""
+        connexion = self.cbConnexionBDD.currentText()
+        if not connexion:
+            QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune connexion sélectionnée.")
+            return
+
+        connection_params = self.get_connection_params(connexion)
+
+        try:
+            conn = psycopg2.connect(
+                dbname=connection_params["dbname"],
+                user=connection_params["user"],
+                password=connection_params["password"],
+                host=connection_params["host"],
+                port=connection_params["port"]
+            )
+            QtWidgets.QMessageBox.information(self, "Succès", f"Connexion réussie à la base '{connection_params['dbname']}' sur {connection_params['host']}:{connection_params['port']}.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur de connexion", f"Impossible de se connecter à la base de données : {str(e)}")
+        finally:
+            if 'conn' in locals() and conn:
+                conn.close()
+
+    def clear_tables(self, conn):
+        """Supprime les tables du schéma 'itv' dont le nom commence par 'table_collecteur_' ou 'table_regard_'."""
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT tablename FROM pg_tables
+                WHERE schemaname = 'itv'
+                AND (tablename LIKE 'table_collecteur_%' OR tablename LIKE 'table_regard_%')
+            """)
+            tables = cursor.fetchall()
+            for (tablename,) in tables:
+                try:
+                    cursor.execute(f'DROP TABLE IF EXISTS itv."{tablename}" CASCADE;')
+                except Exception as e:
+                    pass
+            conn.commit()
+            QtWidgets.QMessageBox.information(self, "Succès", "Les tables temporaires ont été supprimées.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de la suppression des tables : {e}")
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+
+    def import_layer_regard(self, connection_params):
+        """
+        Importe la couche sélectionnée dans mapLayerComboBox_regard dans la base PostgreSQL.
+        """
+        # 1. Récupérer la couche sélectionnée
+        layer = self.mapLayerComboBox_regard.currentLayer()
+        if not layer:
+            QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune couche regard sélectionnée.")
+            return
+
+        # 2. Récupérer le champ ID sélectionné (optionnel)
+        field_id = self.fieldComboBox_regard.currentField()
+        # Utilise field_id si besoin
+
+        dbname = connection_params["dbname"]
+        user = connection_params["user"]
+        password = connection_params["password"]
+        host = connection_params["host"]
+        port = connection_params["port"]
+
+        # 4. Définir le nom de la table cible
+        formatted_table_name = f"table_regard_{layer.name().replace(' ', '_').replace('-', '_').lower()}"
+        if len(formatted_table_name) > 60:
+            formatted_table_name = formatted_table_name[:60]
+
+        # 5. Exporter la couche vers PostgreSQL
+        uri = f"PG:host={host} port={port} dbname={dbname} user={user} password={password}"
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "PostgreSQL"
+        options.layerName = formatted_table_name
+        options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
+        options.layerOptions = [
+            "GEOMETRY_NAME=geom",
+            "SCHEMA=itv",
+            "OVERWRITE=YES",
+            "precision=NO"
+        ]
+
+        try:
+            error, error_string = QgsVectorFileWriter.writeAsVectorFormatV2(
+                layer,
+                uri,
+                QgsProject.instance().transformContext(),
+                options
+            )
+            if error == QgsVectorFileWriter.NoError:
+                QtWidgets.QMessageBox.information(self, "Succès", f"Couche 'regard' importée dans itv.{formatted_table_name}")
+            else:
+                QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'import : {error_string}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors de l'export : {str(e)}")
+    
+    def import_layer_collecteur(self, connection_params):
+        """
+        Importe la couche sélectionnée dans mapLayerComboBox_collecteur dans la base PostgreSQL.
+        """
+        # 1. Récupérer la couche sélectionnée
+        layer = self.mapLayerComboBox_collecteur.currentLayer()
+        if not layer:
+            QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune couche sélectionnée.")
+            return
+
+        # 2. Récupérer le champ ID sélectionné (optionnel selon ton usage)
+        field_id = self.fieldComboBox_collecteur.currentField()
+        # Utilise field_id si tu veux filtrer ou traiter les données
+
+        dbname = connection_params["dbname"]
+        user = connection_params["user"]
+        password = connection_params["password"]
+        host = connection_params["host"]
+        port = connection_params["port"]
+
+        # 4. Définir le nom de la table cible
+        formatted_table_name = f"table_collecteur_{layer.name().replace(' ', '_').replace('-', '_').lower()}"
+        if len(formatted_table_name) > 60:
+            formatted_table_name = formatted_table_name[:60]
+
+        # 5. Exporter la couche vers PostgreSQL
+        uri = f"PG:host={host} port={port} dbname={dbname} user={user} password={password}"
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "PostgreSQL"
+        options.layerName = formatted_table_name
+        options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
+        options.layerOptions = [
+            "GEOMETRY_NAME=geom",
+            "SCHEMA=itv",
+            "OVERWRITE=YES",
+            "precision=NO"
+        ]
+
+        try:
+            error, error_string = QgsVectorFileWriter.writeAsVectorFormatV2(
+                layer,
+                uri,
+                QgsProject.instance().transformContext(),
+                options
+            )
+            if error == QgsVectorFileWriter.NoError:
+                QtWidgets.QMessageBox.information(self, "Succès", f"Couche 'collecteur'importée dans itv.{formatted_table_name}")
+            else:
+                QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'import : {error_string}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors de l'export : {str(e)}")
+
+    def insert_metadata(self, conn, file_path, metadata):
+        """
+        Insère les métadonnées dans la table `itv.inspection` en utilisant la connexion configurée et les nouveaux widgets.
+        """
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            # Requête SQL pour insérer les métadonnées
+            query = """
+                INSERT INTO itv.inspection (
+                    gid, file, "A1", "A2", "A3", "A4", "A5", "A6", shp_reg, shp_coll,
+                    entreprise, pdf_filename, shp_reg_table, shp_coll_table, shp_reg_id_fieldname, shp_coll_id_fieldname, created_by
+                ) VALUES (DEFAULT, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING gid;
+            """
+
+            # Récupérer les noms des couches sélectionnées (collecteur et regard)
+            layer_collecteur = self.mapLayerComboBox_collecteur.currentLayer() if hasattr(self, 'mapLayerComboBox_collecteur') else None
+            layer_regard = self.mapLayerComboBox_regard.currentLayer() if hasattr(self, 'mapLayerComboBox_regard') else None
+            shp_coll = layer_collecteur.name() if layer_collecteur else None
+            shp_reg = layer_regard.name() if layer_regard else None
+
+            # Nom de la table regard (optionnelle)
+            if layer_regard:
+                table_name_reg = layer_regard.name()
+                shp_reg_table = f"table_regard_{table_name_reg}".replace(" ", "_").replace("-", "_").lower()
+                if len(shp_reg_table) > 60:
+                    shp_reg_table = shp_reg_table[:60]
+            else:
+                shp_reg_table = None
+
+            # Nom de la table collecteur (optionnelle)
+            if layer_collecteur:
+                table_name_coll = layer_collecteur.name()
+                shp_coll_table = f"table_collecteur_{table_name_coll}".replace(" ", "_").replace("-", "_").lower()
+                if len(shp_coll_table) > 60:
+                    shp_coll_table = shp_coll_table[:60]
+            else:
+                shp_coll_table = None
+
+            # PDF et entreprise
+            pdf_filename = self.lineEdit_rapport.text() if hasattr(self, 'lineEdit_rapport') else None
+            enterprise_name = self.lineEdit_entreprise.text() if hasattr(self, 'lineEdit_entreprise') else None
+
+            # Champs de jointure
+            shp_reg_id_fieldname = self.fieldComboBox_regard.currentText() if hasattr(self, 'fieldComboBox_regard') and self.fieldComboBox_regard.currentIndex() != -1 else None
+            shp_coll_id_fieldname = self.fieldComboBox_collecteur.currentText() if hasattr(self, 'fieldComboBox_collecteur') and self.fieldComboBox_collecteur.currentIndex() != -1 else None
+            
+            # Préparation des valeurs à insérer
+            values = (
+                file_path,  # Nom du fichier
+                metadata.get("charset"),  # A1
+                metadata.get("language"),  # A2
+                metadata.get("delimiter"),  # A3
+                metadata.get("decimalSeparator"),  # A4
+                metadata.get("quoteChar"),  # A5
+                metadata.get("version"),  # A6
+                shp_reg,  # Nom de la couche regard
+                shp_coll,  # Nom de la couche collecteur
+                enterprise_name,  # Nom de l'entreprise
+                pdf_filename,  # Nom du fichier PDF
+                shp_reg_table,  # Nom de la table shp_reg
+                shp_coll_table,  # Nom de la table shp_coll
+                shp_reg_id_fieldname,  # Champ jointure regard
+                shp_coll_id_fieldname,  # Champ jointure collecteur
+                1  # created_by (exemple)
+            )
+
+            # Exécution de la requête
+            cursor.execute(query, values)
+            inspection_gid = cursor.fetchone()[0]  # Récupère l'ID généré
+
+            # Validation des changements
+            conn.commit()
+            QtWidgets.QMessageBox.information(self, "Succès", f"Métadonnées insérées avec succès dans la table `inspection` avec gid={inspection_gid}.")
+
+            return inspection_gid
+
+        except psycopg2.OperationalError as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur de connexion", f"Erreur de connexion : {str(e)}")
+        except psycopg2.Error as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur SQL", f"Erreur SQL : {str(e)}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur inattendue", f"Erreur inattendue : {str(e)}")
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+        return None
+
+    def insert_data(self, conn, inspection_gid, passages):
+        """
+        Insère les passages dans la table `itv.passage` pour une inspection donnée, ainsi que les tables associées, en utilisant la connexion configurée.
+        """
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            query = """
+                INSERT INTO itv.passage (
+                    gid, n_passage, inspection_gid
+                ) VALUES (DEFAULT, %s, %s)
+                RETURNING gid;
+            """
+
+            for passage in passages:
+                n_passage = passage.get("n_passage")
+                cursor.execute(query, (n_passage, inspection_gid))
+                passage_gid = cursor.fetchone()[0]
+
+                # Insérer les données des tables associées au passage si elles existent
+                if "tables" in passage:
+                    if "#B01" in passage["tables"]:
+                        b01_data = passage["tables"]["#B01"]
+                        insert_b01_table(self, cursor, passage_gid, b01_data)
+                    if "#B02" in passage["tables"]:
+                        b02_data = passage["tables"]["#B02"]
+                        insert_b02_table(self, cursor, passage_gid, b02_data)
+                    if "#B03" in passage["tables"]:
+                        b03_data = passage["tables"]["#B03"]
+                        insert_b03_table(self, cursor, passage_gid, b03_data)
+                    if "#B04" in passage["tables"]:
+                        b04_data = passage["tables"]["#B04"]
+                        insert_b04_table(self, cursor, passage_gid, b04_data)
+                    if "#C" in passage["tables"]:
+                        c_data = passage["tables"]["#C"]
+                        insert_c_table(self, cursor, passage_gid, c_data)
+
+            conn.commit()
+            QtWidgets.QMessageBox.information(self, "Succès", "Passages insérés avec succès dans la table `passage` et les tables associées.")
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'insertion des passages : {str(e)}")
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+
+    def import_txt_data(self, conn):
+        """
+        Charge les données extraites du fichier TXT dans la base de données.
+        """
+
+        file_path = self.inputFileTXT.filePath()
+
+        if not file_path:
+            QtWidgets.QMessageBox.warning(self, "Erreur", "Veuillez sélectionner un fichier TXT avant de continuer.")
+            return
+
+        inspection_gid = None
+        try:
+            parser = FileParser()
+            parsed_data = parser.parse(file_path)
+            metadata = parsed_data["metadata"]
+            passages = parsed_data["passages"]
+
+            inspection_gid = self.insert_metadata(conn, file_path, metadata)
+            if inspection_gid:
+                self.insert_data(conn, inspection_gid, passages)
+                QtWidgets.QMessageBox.information(self, "Succès", "Processus d'importation terminé avec succès.")
+            else:
+                QtWidgets.QMessageBox.critical(self, "Erreur", "Erreur lors de l'insertion des métadonnées. Processus interrompu.")
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'importation des données : {str(e)}")
+        finally:
+            pass
+
+        return inspection_gid
+
+    def set_id_sig(self, conn, inspection_gid):
+        """
+        Exécute la fonction SQL `itv.set_id_sig` sur la base de données et affiche un message de succès.
+        """
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            query = f"SELECT itv.set_id_sig({inspection_gid})"
+            cursor.execute(query)
+            conn.commit()
+            QtWidgets.QMessageBox.information(self, "Succès", "Mise à jour des correspondances effectuée avec succès.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'exécution de la fonction SQL : {str(e)}")
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+    
+    def update_ids_reg_from_csv(self, conn, inspection_gid):
+        """
+        Met à jour la colonne id_sig dans itv.ids_reg à partir d'un CSV si fichier de correspondance regard fourni.
+        """
+        csv_path = self.inputFileCSV_regard.filePath()
+        if not csv_path or not os.path.exists(csv_path):
+            QtWidgets.QMessageBox.information(self, "Info", "Aucun fichier CSV de correspondance regard accessible. Opération ignorée.")
+            return
+
+        cursor = None
+        try:
+            correspondance_data = {}
+            with open(csv_path, "r", encoding="utf-8") as f:
+                first_line = f.readline()
+                if "\t" in first_line and "," not in first_line and ";" not in first_line:
+                    sep = "\t"
+                elif ";" in first_line and "," not in first_line:
+                    sep = ";"
+                else:
+                    sep = ","
+                headers = [h.strip() for h in first_line.strip().split(sep)]
+
+                id_regard_col = "id_regard" if "id_regard" in headers else ("id_itv" if "id_itv" in headers else None)
+                if not id_regard_col or "id_sig" not in headers:
+                    QtWidgets.QMessageBox.critical(self, "Erreur", "Le CSV doit contenir 'id_regard' ou 'id_itv' et 'id_sig'.")
+                    return
+
+                id_regard_index = headers.index(id_regard_col)
+                id_sig_index = headers.index("id_sig")
+
+                for line in f:
+                    if not line.strip():
+                        continue
+                    values = [v.strip() for v in line.strip().split(sep)]
+                    if len(values) <= max(id_regard_index, id_sig_index):
+                        continue
+                    id_regard = values[id_regard_index]
+                    id_sig = values[id_sig_index] if id_sig_index < len(values) else None
+                    if id_regard and id_sig:
+                        correspondance_data[id_regard] = id_sig
+
+            cursor = conn.cursor()
+
+            for id_regard, id_sig in correspondance_data.items():
+                update_query = """
+                    UPDATE itv.ids_reg
+                    SET id_sig = %s
+                    WHERE id_sig IS NULL AND inspection_gid = %s AND id_itv = %s
+                """
+                cursor.execute(update_query, (id_sig, inspection_gid, id_regard))
+
+            conn.commit()
+            QtWidgets.QMessageBox.information(self, "Succès", "Correspondances regard mises à jour avec succès.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de la mise à jour de la table itv.ids_reg : {str(e)}")
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+
+    def update_ids_coll_from_csv(self, conn, inspection_gid):
+        """
+        Met à jour la colonne id_sig dans itv.ids_coll à partir d'un CSV si fichier de correspondance collecteur fourni.
+        """
+        csv_path = self.inputFileCSV_collecteur.filePath()
+        if not csv_path or not os.path.exists(csv_path):
+            QtWidgets.QMessageBox.information(self, "Info", "Aucun fichier CSV de correspondance collecteur accessible. Opération ignorée.")
+            return
+
+        cursor = None
+        try:
+            correspondance_data = {}
+            with open(csv_path, "r", encoding="utf-8") as f:
+                first_line = f.readline()
+                if "\t" in first_line and "," not in first_line and ";" not in first_line:
+                    sep = "\t"
+                elif ";" in first_line and "," not in first_line:
+                    sep = ";"
+                else:
+                    sep = ","
+                headers = [h.strip() for h in first_line.strip().split(sep)]
+
+                id_troncon_col = "id_troncon" if "id_troncon" in headers else ("id_itv" if "id_itv" in headers else None)
+                if not id_troncon_col or "id_sig" not in headers:
+                    QtWidgets.QMessageBox.critical(self, "Erreur", "Le CSV doit contenir 'id_troncon' ou 'id_itv' et 'id_sig'.")
+                    return
+
+                id_troncon_index = headers.index(id_troncon_col)
+                id_sig_index = headers.index("id_sig")
+
+                for line in f:
+                    if not line.strip():
+                        continue
+                    values = [v.strip() for v in line.strip().split(sep)]
+                    if len(values) <= max(id_troncon_index, id_sig_index):
+                        continue
+                    id_troncon = values[id_troncon_index]
+                    id_sig = values[id_sig_index] if id_sig_index < len(values) else None
+                    if id_troncon and id_sig:
+                        correspondance_data[id_troncon] = id_sig
+
+            cursor = conn.cursor()
+
+            for id_troncon, id_sig in correspondance_data.items():
+                update_query = """
+                    UPDATE itv.ids_coll
+                    SET id_sig = %s
+                    WHERE id_sig IS NULL AND inspection_gid = %s AND id_itv = %s
+                """
+                cursor.execute(update_query, (id_sig, inspection_gid, id_troncon))
+
+            conn.commit()
+            QtWidgets.QMessageBox.information(self, "Succès", "Correspondances collecteur mises à jour avec succès.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de la mise à jour de la table itv.ids_coll : {str(e)}")
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+    
+    def display_v_inspection_view(self, connection_params, inspection_gid):
+        """
+        Affiche dans QGIS la vue SQL `itv.v_inspection` pour une inspection donnée et zoome sur l'emprise de la couche.
+        """
+        try:
+
+            dbname = connection_params["dbname"]
+            user = connection_params["user"]
+            password = connection_params["password"]
+            host = connection_params["host"]
+            port = connection_params["port"]
+
+            query = f"(SELECT * FROM itv.v_inspection WHERE inspection_gid = {inspection_gid})"
+            geom_column = "geom"
+            srid = 2154
+            primary_key = "inspection_gid"
+
+            uri = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"key='{primary_key}' srid={srid} type=Polygon table=\"({query})\" ({geom_column})"
+            )
+
+            layer_name = f"Inspection {inspection_gid} - v_inspection"
+            layer = QgsVectorLayer(uri, layer_name, "postgres")
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+                # Optionnel : appliquer un style QML si tu as LayerStyler
+                # LayerStyler.apply_style(layer, "emprise.qml")
+                # Zoom sur l'emprise
+                iface = self.iface if hasattr(self, 'iface') else None
+                if iface:
+                    canvas = iface.mapCanvas()
+                    canvas.setExtent(layer.extent())
+                    canvas.refresh()
+            else:
+                QtWidgets.QMessageBox.critical(self, "Erreur", f"Impossible de charger la vue 'itv.v_inspection' pour l'inspection {inspection_gid} dans QGIS.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors de l'affichage de la vue : {str(e)}")
+
+    def display_v_itv_details_geom_view(self, connection_params, inspection_gid):
+        """
+        Affiche dans QGIS la vue SQL `itv.v_itv_details_geom` pour une inspection donnée.
+        """
+        try:
+
+            dbname = connection_params["dbname"]
+            user = connection_params["user"]
+            password = connection_params["password"]
+            host = connection_params["host"]
+            port = connection_params["port"]
+
+            query = f"(SELECT * FROM itv.v_itv_details_geom WHERE inspection_gid = {inspection_gid})"
+            geom_column = "geom"
+            srid = 2154
+            primary_key = "gid"
+
+            uri = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"key='{primary_key}' srid={srid} type=Point table=\"({query})\" ({geom_column})"
+            )
+
+            layer_name = f"Details Geom {inspection_gid} - v_itv_details_geom"
+            layer = QgsVectorLayer(uri, layer_name, "postgres")
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+                # Optionnel : LayerStyler.apply_style(layer, "inspections.qml")
+            else:
+                QtWidgets.QMessageBox.critical(self, "Erreur", f"Impossible de charger la vue 'itv.v_itv_details_geom' pour l'inspection {inspection_gid} dans QGIS.")
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors de l'affichage de la vue : {str(e)}")
+
+    def display_v_itv_details_bcht_view(self, connection_params, inspection_gid):
+        """
+        Affiche dans QGIS la vue SQL `itv.v_itv_details_bcht` pour une inspection donnée.
+        Importe également la vue `itv.v_itv_details_bcht_lines` si elle existe.
+        """
+        try:
+
+            dbname = connection_params["dbname"]
+            user = connection_params["user"]
+            password = connection_params["password"]
+            host = connection_params["host"]
+            port = connection_params["port"]
+
+            # Vue points
+            query = f"(SELECT * FROM itv.v_itv_details_bcht WHERE inspection_gid = {inspection_gid})"
+            geom_column = "geom"
+            srid = 2154
+            primary_key = "id"
+            uri = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"key='{primary_key}' srid={srid} type=Point table=\"({query})\" ({geom_column})"
+            )
+            layer_name = f"Details Bcht {inspection_gid} - v_itv_details_bcht"
+            layer = QgsVectorLayer(uri, layer_name, "postgres")
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+                # Optionnel : LayerStyler.apply_style(layer, "bcht.qml")
+            else:
+                QtWidgets.QMessageBox.critical(self, "Erreur", f"Impossible de charger la vue 'itv.v_itv_details_bcht' pour l'inspection {inspection_gid} dans QGIS.")
+
+            # Vue lines (optionnelle)
+            sql_query_lines = f"(SELECT * FROM itv.v_itv_details_bcht_lines WHERE inspection_gid = {inspection_gid})"
+            geom_column_lines = "geom"
+            srid_lines = 2154
+            primary_key_lines = "id"
+            uri_lines = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"key='{primary_key_lines}' srid={srid_lines} type=LineString table=\"({sql_query_lines})\" ({geom_column_lines})"
+            )
+            layer_name_lines = f"Details Bcht Lines {inspection_gid} - v_itv_details_bcht_lines"
+            layer_lines = QgsVectorLayer(uri_lines, layer_name_lines, "postgres")
+            if layer_lines.isValid():
+                QgsProject.instance().addMapLayer(layer_lines)
+                # Optionnel : LayerStyler.apply_style(layer_lines, "bcht_lines.qml")
+            # Pas d'erreur si la vue lines n'existe pas
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors de l'affichage de la vue : {str(e)}")
+    
+    def load_ids_tables(self, connection_params, inspection_gid):
+        """
+        Charge les tables `ids_coll` et `ids_reg` dans QGIS pour une inspection donnée (sans géométrie, comme des tables CSV).
+        Affiche également les données dans les logs/messages.
+        """
+        # Chargement direct des tables ids_coll et ids_reg dans QGIS via PostgreSQL
+        try:
+
+            dbname = connection_params["dbname"]
+            user = connection_params["user"]
+            password = connection_params["password"]
+            host = connection_params["host"]
+            port = connection_params["port"]
+
+            # ids_coll
+            query_coll = f"(SELECT * FROM itv.ids_coll WHERE inspection_gid = {inspection_gid})"
+            uri_coll = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"table=\"{query_coll}\" sql= inspection_gid={inspection_gid}"
+            )
+            layer_coll = QgsVectorLayer(uri_coll, f"ids_coll - Inspection {inspection_gid}", "postgres")
+            if layer_coll.isValid() and layer_coll.featureCount() > 0:
+                QgsProject.instance().addMapLayer(layer_coll)
+                QtWidgets.QMessageBox.information(self, "Succès", f"Table 'ids_coll' pour l'inspection {inspection_gid} ajoutée à QGIS.")
+            else:
+                QtWidgets.QMessageBox.information(self, "Info", f"Aucune donnée trouvée ou impossible de charger 'ids_coll' pour inspection_gid={inspection_gid}.")
+
+            # ids_reg
+            query_reg = f"(SELECT * FROM itv.ids_reg WHERE inspection_gid = {inspection_gid})"
+            uri_reg = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"table=\"{query_reg}\" sql= inspection_gid={inspection_gid}"
+            )
+            layer_reg = QgsVectorLayer(uri_reg, f"ids_reg - Inspection {inspection_gid}", "postgres")
+            if layer_reg.isValid() and layer_reg.featureCount() > 0:
+                QgsProject.instance().addMapLayer(layer_reg)
+                QtWidgets.QMessageBox.information(self, "Succès", f"Table 'ids_reg' pour l'inspection {inspection_gid} ajoutée à QGIS.")
+            else:
+                QtWidgets.QMessageBox.information(self, "Info", f"Aucune donnée trouvée ou impossible de charger 'ids_reg' pour inspection_gid={inspection_gid}.")
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors du chargement des tables : {str(e)}")
+        finally:
+            pass
+    
+    def execute(self):
+
+        """Vérifie qu'une base de données est sélectionnée avant d'exécuter la suite."""
+        connexion = self.cbConnexionBDD.currentText()
+        if not connexion:
+            QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune connexion sélectionnée.")
+            return
+
+        # Connexion à PostgreSQL
+        connection_params = self.get_connection_params(connexion)
+        try:
+            conn = psycopg2.connect(
+                dbname=connection_params["dbname"],
+                user=connection_params["user"],
+                password=connection_params["password"],
+                host=connection_params["host"],
+                port=connection_params["port"]
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur de connexion", f"Impossible de se connecter à la base de données : {str(e)}")
+            return
+
+        try:
+            # Suppression des tables avant import
+            self.clear_tables(conn)
+
+            # Import de la couche regard
+            self.import_layer_regard(connection_params)
+
+            # Import de la couche collecteur
+            self.import_layer_collecteur(connection_params)
+
+            # Import des données du fichier TXT (ITV) et recupération de l'ID de l'inspection
+            inspection_gid = self.import_txt_data(conn)
+
+            # Affectation des identifiants SIG
+            self.set_id_sig(conn, inspection_gid)
+
+            # Mise à jour des identifiants si fichier de correspondance regard fourni
+            self.update_ids_reg_from_csv(conn, inspection_gid)
+
+            # Mise à jour des identifiants si fichier de correspondance collecteur fourni
+            self.update_ids_coll_from_csv(conn, inspection_gid)
+
+            # Affichage des résultats
+            # - emprise (polygon) : emprise de l'inspection
+            # - details (points) : observations géolocalisées
+            # - bcht orientation (lines) : orientation des branchements
+            # - bcht (points) : branchements
+            self.display_v_inspection_view(connection_params, inspection_gid)
+            self.display_v_itv_details_geom_view(connection_params, inspection_gid)
+            self.display_v_itv_details_bcht_view(connection_params, inspection_gid)
+
+            # Affichage des tables d'identifiants
+            self.load_ids_tables(connection_params, inspection_gid)
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass

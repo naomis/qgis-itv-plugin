@@ -25,6 +25,8 @@ from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 
+from qgis.core import QgsProviderRegistry, QgsWkbTypes, QgsMapLayerProxyModel
+
 # Initialize Qt resources from file resources.py
 from .resources import *
 # Import the code for the dialog
@@ -189,6 +191,15 @@ class GeoITV:
             self.first_start = False
             self.dlg = GeoITVDialog()
 
+        # Get the list of PostgreSQL connections and populate the combo box
+        connexions = QgsProviderRegistry.instance().providerMetadata("postgres").connections()
+        self.dlg.cbConnexionBDD.clear()
+        self.dlg.cbConnexionBDD.addItems(connexions.keys())
+
+        # Set geometry types for layer selection comboBoxes
+        self.dlg.mapLayerComboBox_regard.setFilters(QgsMapLayerProxyModel.PointLayer)
+        self.dlg.mapLayerComboBox_collecteur.setFilters(QgsMapLayerProxyModel.LineLayer)
+        
         # show the dialog
         self.dlg.show()
         # Run the dialog event loop
@@ -198,3 +209,4 @@ class GeoITV:
             # Do something useful here - delete the line containing pass and
             # substitute with your code.
             pass
+
