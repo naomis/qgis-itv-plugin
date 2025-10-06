@@ -38,20 +38,80 @@ FORM_CLASS, _ = uic.loadUiType(os.path.join(
 
 
 class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
+    def set_progress(self, value):
+        """
+        Définit la valeur de la progressBar si elle existe.
+        """
+        if hasattr(self, 'progressBar') and self.progressBar is not None:
+            try:
+                self.progressBar.setValue(value)
+            except Exception:
+                pass
+    
+    def log_info(self, message, raz=False):
+        """
+        Affiche un message d'information dans le widget textEdit_log s'il existe, sinon ne fait rien.
+        """
+        if hasattr(self, 'textEdit_log') and self.textEdit_log is not None:
+            try:
+                if raz:
+                    self.textEdit_log.clear()
+                self.textEdit_log.append(message)
+            except Exception:
+                pass
+
 
     def __init__(self, parent=None):
-        """Constructor."""
+        """
+        Constructeur du dialogue principal du plugin GeoITV.
+        Initialise l'UI, connecte les boutons et prépare la gestion dynamique de l'état du bouton d'exécution.
+        """
         super(GeoITVDialog, self).__init__(parent)
-        # Set up the user interface from Designer through FORM_CLASS.
-        # After self.setupUi() you can access any designer object by doing
-        # self.<objectname>, and you can use autoconnect slots - see
-        # http://qt-project.org/doc/qt-4.8/designer-using-a-ui-file.html
-        # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
 
-        #connect buttons
+        # Connexion des boutons principaux
         self.btTestConnexion.clicked.connect(self.test_connexion)
         self.btExecute.clicked.connect(self.execute)
+
+        # État initial du bouton d'exécution
+        self.update_btExecute_enabled()
+
+        # Connexion des signaux pour activer/désactiver dynamiquement le bouton d'exécution
+        if hasattr(self, 'cmbConnexionBDD'):
+            self.cmbConnexionBDD.currentIndexChanged.connect(self.update_btExecute_enabled)
+        if hasattr(self, 'inputFileTXT'):
+            self.inputFileTXT.fileChanged.connect(self.update_btExecute_enabled)
+        if hasattr(self, 'mapLayerComboBox_regard'):
+            self.mapLayerComboBox_regard.layerChanged.connect(self.update_btExecute_enabled)
+
+    def update_btExecute_enabled(self):
+        """
+        Active le bouton d'exécution uniquement si tous les champs obligatoires sont renseignés :
+        - Connexion BDD
+        - Fichier TXT
+        - Couche regard
+        """
+        has_conn = False
+        has_txt = False
+        has_regard = False
+
+        if hasattr(self, 'cmbConnexionBDD'):
+            has_conn = bool(self.cmbConnexionBDD.currentText())
+        if hasattr(self, 'inputFileTXT'):
+            # inputFileTXT peut être un widget fichier ou un QLineEdit
+            try:
+                has_txt = bool(self.inputFileTXT.filePath())
+            except Exception:
+                has_txt = bool(self.inputFileTXT.text())
+        if hasattr(self, 'mapLayerComboBox_regard'):
+            try:
+                has_regard = self.mapLayerComboBox_regard.currentLayer() is not None
+            except Exception:
+                has_regard = False
+
+        enabled = has_conn and has_txt and has_regard
+        if hasattr(self, 'btExecute'):
+            self.btExecute.setEnabled(enabled)
 
     def get_connection_params(self, connexion_name):
         """Récupère les paramètres de connexion PostgreSQL à partir du nom de la connexion."""
@@ -67,7 +127,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def test_connexion(self):
         """Test the database connection using the selected connection."""
-        connexion = self.cbConnexionBDD.currentText()
+        connexion = self.cmbConnexionBDD.currentText()
         if not connexion:
             QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune connexion sélectionnée.")
             return
@@ -94,6 +154,12 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         cursor = None
         try:
             cursor = conn.cursor()
+            # Truncate la table inspection (et tout ce qui dépend d'elle)
+            try:
+                cursor.execute('TRUNCATE TABLE itv.inspection CASCADE;')
+            except Exception as e:
+                pass
+
             cursor.execute("""
                 SELECT tablename FROM pg_tables
                 WHERE schemaname = 'itv'
@@ -106,7 +172,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 except Exception as e:
                     pass
             conn.commit()
-            QtWidgets.QMessageBox.information(self, "Succès", "Les tables temporaires ont été supprimées.")
+            self.log_info("Les tables temporaires ont été supprimées et la table inspection a été vidée.")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de la suppression des tables : {e}")
         finally:
@@ -120,28 +186,45 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         Importe la couche sélectionnée dans mapLayerComboBox_regard dans la base PostgreSQL.
         """
-        # 1. Récupérer la couche sélectionnée
-        layer = self.mapLayerComboBox_regard.currentLayer()
-        if not layer:
-            QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune couche regard sélectionnée.")
-            return
-
-        # 2. Récupérer le champ ID sélectionné (optionnel)
-        field_id = self.fieldComboBox_regard.currentField()
-        # Utilise field_id si besoin
-
         dbname = connection_params["dbname"]
         user = connection_params["user"]
         password = connection_params["password"]
         host = connection_params["host"]
         port = connection_params["port"]
 
-        # 4. Définir le nom de la table cible
+        # 1. Récupérer la couche sélectionnée
+        layer = self.mapLayerComboBox_regard.currentLayer()
+        if not layer:
+            QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune couche regard sélectionnée.")
+            return
+
+        # 2. Définir le nom de la table cible
         formatted_table_name = f"table_regard_{layer.name().replace(' ', '_').replace('-', '_').lower()}"
         if len(formatted_table_name) > 60:
             formatted_table_name = formatted_table_name[:60]
 
-        # 5. Exporter la couche vers PostgreSQL
+        # 3. Nettoyer les champs texte pour garantir l'encodage UTF-8 strict (remplacement des caractères non-ASCII)
+        import re
+        layer.startEditing()
+        for feature in layer.getFeatures():
+            attrs = feature.attributes()
+            for idx, field in enumerate(layer.fields()):
+                val = attrs[idx]
+                if field.typeName().lower() in ['string', 'text'] and val is not None:
+                    try:
+                        if isinstance(val, bytes):
+                            val_str = val.decode('utf-8', errors='replace')
+                        else:
+                            val_str = str(val)
+                        # Remplacer tout caractère non-ASCII par un espace
+                        val_clean = re.sub(r'[^\x20-\x7E]', ' ', val_str)
+                        if val != val_clean:
+                            layer.changeAttributeValue(feature.id(), idx, val_clean)
+                    except Exception:
+                        layer.changeAttributeValue(feature.id(), idx, "")
+        layer.commitChanges()
+
+        # 4. Ecrire la couche temporaire dans PostgreSQL
         uri = f"PG:host={host} port={port} dbname={dbname} user={user} password={password}"
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName = "PostgreSQL"
@@ -162,7 +245,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 options
             )
             if error == QgsVectorFileWriter.NoError:
-                QtWidgets.QMessageBox.information(self, "Succès", f"Couche 'regard' importée dans itv.{formatted_table_name}")
+                self.log_info(f"Couche 'regard' importée dans itv.{formatted_table_name}")
             else:
                 QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'import : {error_string}")
         except Exception as e:
@@ -172,28 +255,45 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         Importe la couche sélectionnée dans mapLayerComboBox_collecteur dans la base PostgreSQL.
         """
-        # 1. Récupérer la couche sélectionnée
-        layer = self.mapLayerComboBox_collecteur.currentLayer()
-        if not layer:
-            QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune couche sélectionnée.")
-            return
-
-        # 2. Récupérer le champ ID sélectionné (optionnel selon ton usage)
-        field_id = self.fieldComboBox_collecteur.currentField()
-        # Utilise field_id si tu veux filtrer ou traiter les données
-
         dbname = connection_params["dbname"]
         user = connection_params["user"]
         password = connection_params["password"]
         host = connection_params["host"]
         port = connection_params["port"]
 
-        # 4. Définir le nom de la table cible
+        # 1. Récupérer la couche sélectionnée
+        layer = self.mapLayerComboBox_collecteur.currentLayer()
+        if not layer:
+            self.log_info("Aucune couche 'collecteur'sélectionnée.")
+            return
+
+        # 2. Définir le nom de la table cible
         formatted_table_name = f"table_collecteur_{layer.name().replace(' ', '_').replace('-', '_').lower()}"
         if len(formatted_table_name) > 60:
             formatted_table_name = formatted_table_name[:60]
 
-        # 5. Exporter la couche vers PostgreSQL
+        # 3. Nettoyer les champs texte pour garantir l'encodage UTF-8 strict (remplacement des caractères non-ASCII)
+        import re
+        layer.startEditing()
+        for feature in layer.getFeatures():
+            attrs = feature.attributes()
+            for idx, field in enumerate(layer.fields()):
+                val = attrs[idx]
+                if field.typeName().lower() in ['string', 'text'] and val is not None:
+                    try:
+                        if isinstance(val, bytes):
+                            val_str = val.decode('utf-8', errors='replace')
+                        else:
+                            val_str = str(val)
+                        # Remplacer tout caractère non-ASCII par un espace
+                        val_clean = re.sub(r'[^\x20-\x7E]', ' ', val_str)
+                        if val != val_clean:
+                            layer.changeAttributeValue(feature.id(), idx, val_clean)
+                    except Exception:
+                        layer.changeAttributeValue(feature.id(), idx, "")
+        layer.commitChanges()
+
+        # 4. Ecrire la couche temporaire dans PostgreSQL
         uri = f"PG:host={host} port={port} dbname={dbname} user={user} password={password}"
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName = "PostgreSQL"
@@ -214,7 +314,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 options
             )
             if error == QgsVectorFileWriter.NoError:
-                QtWidgets.QMessageBox.information(self, "Succès", f"Couche 'collecteur'importée dans itv.{formatted_table_name}")
+                self.log_info(f"Couche 'collecteur'importée dans itv.{formatted_table_name}")
             else:
                 QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'import : {error_string}")
         except Exception as e:
@@ -294,7 +394,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
 
             # Validation des changements
             conn.commit()
-            QtWidgets.QMessageBox.information(self, "Succès", f"Métadonnées insérées avec succès dans la table `inspection` avec gid={inspection_gid}.")
+            self.log_info(f"Métadonnées insérées avec succès dans la table `inspection` avec gid={inspection_gid}.")
 
             return inspection_gid
 
@@ -315,8 +415,10 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
     def insert_data(self, conn, inspection_gid, passages):
         """
         Insère les passages dans la table `itv.passage` pour une inspection donnée, ainsi que les tables associées, en utilisant la connexion configurée.
+        Affiche le numéro de passage dans le log.
         """
         cursor = None
+        total = len(passages)
         try:
             cursor = conn.cursor()
             query = """
@@ -326,8 +428,9 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 RETURNING gid;
             """
 
-            for passage in passages:
+            for idx, passage in enumerate(passages, 1):
                 n_passage = passage.get("n_passage")
+                self.log_info(f"Insertion du passage n°{n_passage} ({idx}/{total})...")
                 cursor.execute(query, (n_passage, inspection_gid))
                 passage_gid = cursor.fetchone()[0]
 
@@ -350,7 +453,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                         insert_c_table(self, cursor, passage_gid, c_data)
 
             conn.commit()
-            QtWidgets.QMessageBox.information(self, "Succès", "Passages insérés avec succès dans la table `passage` et les tables associées.")
+            self.log_info("Passages insérés avec succès dans la table `passage` et les tables associées.")
 
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'insertion des passages : {str(e)}")
@@ -369,7 +472,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         file_path = self.inputFileTXT.filePath()
 
         if not file_path:
-            QtWidgets.QMessageBox.warning(self, "Erreur", "Veuillez sélectionner un fichier TXT avant de continuer.")
+            QtWidgets.QMessageBox.critical(self, "Erreur", "Veuillez sélectionner un fichier TXT avant de continuer.")
             return
 
         inspection_gid = None
@@ -382,7 +485,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             inspection_gid = self.insert_metadata(conn, file_path, metadata)
             if inspection_gid:
                 self.insert_data(conn, inspection_gid, passages)
-                QtWidgets.QMessageBox.information(self, "Succès", "Processus d'importation terminé avec succès.")
+                self.log_info("Processus d'importation terminé avec succès.")
             else:
                 QtWidgets.QMessageBox.critical(self, "Erreur", "Erreur lors de l'insertion des métadonnées. Processus interrompu.")
 
@@ -403,7 +506,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             query = f"SELECT itv.set_id_sig({inspection_gid})"
             cursor.execute(query)
             conn.commit()
-            QtWidgets.QMessageBox.information(self, "Succès", "Mise à jour des correspondances effectuée avec succès.")
+            self.log_info("Mise à jour des correspondances effectuée avec succès.")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'exécution de la fonction SQL : {str(e)}")
         finally:
@@ -419,7 +522,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         csv_path = self.inputFileCSV_regard.filePath()
         if not csv_path or not os.path.exists(csv_path):
-            QtWidgets.QMessageBox.information(self, "Info", "Aucun fichier CSV de correspondance regard accessible. Opération ignorée.")
+            self.log_info("Aucun fichier CSV de correspondance regard accessible. Opération ignorée.")
             return
 
         cursor = None
@@ -451,6 +554,10 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                         continue
                     id_regard = values[id_regard_index]
                     id_sig = values[id_sig_index] if id_sig_index < len(values) else None
+                    if id_regard:
+                        id_regard = id_regard.strip('"')
+                    if id_sig:
+                        id_sig = id_sig.strip('"')
                     if id_regard and id_sig:
                         correspondance_data[id_regard] = id_sig
 
@@ -465,7 +572,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 cursor.execute(update_query, (id_sig, inspection_gid, id_regard))
 
             conn.commit()
-            QtWidgets.QMessageBox.information(self, "Succès", "Correspondances regard mises à jour avec succès.")
+            self.log_info("Correspondances regard mises à jour avec succès.")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de la mise à jour de la table itv.ids_reg : {str(e)}")
         finally:
@@ -481,7 +588,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         csv_path = self.inputFileCSV_collecteur.filePath()
         if not csv_path or not os.path.exists(csv_path):
-            QtWidgets.QMessageBox.information(self, "Info", "Aucun fichier CSV de correspondance collecteur accessible. Opération ignorée.")
+            self.log_info("Aucun fichier CSV de correspondance collecteur accessible. Opération ignorée.")
             return
 
         cursor = None
@@ -527,7 +634,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 cursor.execute(update_query, (id_sig, inspection_gid, id_troncon))
 
             conn.commit()
-            QtWidgets.QMessageBox.information(self, "Succès", "Correspondances collecteur mises à jour avec succès.")
+            self.log_info("Correspondances collecteur mises à jour avec succès.")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de la mise à jour de la table itv.ids_coll : {str(e)}")
         finally:
@@ -551,20 +658,25 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
 
             query = f"(SELECT * FROM itv.v_inspection WHERE inspection_gid = {inspection_gid})"
             geom_column = "geom"
-            srid = 2154
             primary_key = "inspection_gid"
 
             uri = (
                 f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
-                f"key='{primary_key}' srid={srid} type=Polygon table=\"({query})\" ({geom_column})"
+                f"key='{primary_key}' type=Polygon table=\"({query})\" ({geom_column})"
             )
 
-            layer_name = f"Inspection {inspection_gid} - v_inspection"
+            layer_name = f"itv_inspection-{inspection_gid}"
             layer = QgsVectorLayer(uri, layer_name, "postgres")
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
-                # Optionnel : appliquer un style QML si tu as LayerStyler
-                # LayerStyler.apply_style(layer, "emprise.qml")
+                # Appliquer un style QML natif PyQGIS si le fichier existe
+                try:
+                    qml_path = os.path.join(os.path.dirname(__file__), 'styles', 'itv_inspection.qml')
+                    if os.path.exists(qml_path):
+                        layer.loadNamedStyle(qml_path)
+                        layer.triggerRepaint()
+                except Exception as e:
+                    self.log_info(f"Impossible d'appliquer le style QML : {e}")
                 # Zoom sur l'emprise
                 iface = self.iface if hasattr(self, 'iface') else None
                 if iface:
@@ -590,19 +702,25 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
 
             query = f"(SELECT * FROM itv.v_itv_details_geom WHERE inspection_gid = {inspection_gid})"
             geom_column = "geom"
-            srid = 2154
             primary_key = "gid"
 
             uri = (
                 f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
-                f"key='{primary_key}' srid={srid} type=Point table=\"({query})\" ({geom_column})"
+                f"key='{primary_key}' type=Point table=\"({query})\" ({geom_column})"
             )
 
-            layer_name = f"Details Geom {inspection_gid} - v_itv_details_geom"
+            layer_name = f"itv_details-{inspection_gid}"
             layer = QgsVectorLayer(uri, layer_name, "postgres")
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
-                # Optionnel : LayerStyler.apply_style(layer, "inspections.qml")
+                # Appliquer un style QML natif PyQGIS si le fichier existe
+                try:
+                    qml_path = os.path.join(os.path.dirname(__file__), 'styles', 'itv_details_geom.qml')
+                    if os.path.exists(qml_path):
+                        layer.loadNamedStyle(qml_path)
+                        layer.triggerRepaint()
+                except Exception as e:
+                    self.log_info(f"Impossible d'appliquer le style QML : {e}")
             else:
                 QtWidgets.QMessageBox.critical(self, "Erreur", f"Impossible de charger la vue 'itv.v_itv_details_geom' pour l'inspection {inspection_gid} dans QGIS.")
 
@@ -625,35 +743,46 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             # Vue points
             query = f"(SELECT * FROM itv.v_itv_details_bcht WHERE inspection_gid = {inspection_gid})"
             geom_column = "geom"
-            srid = 2154
             primary_key = "id"
             uri = (
                 f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
-                f"key='{primary_key}' srid={srid} type=Point table=\"({query})\" ({geom_column})"
+                f"key='{primary_key}' type=Point table=\"({query})\" ({geom_column})"
             )
-            layer_name = f"Details Bcht {inspection_gid} - v_itv_details_bcht"
+            layer_name = f"itv_details_bcht-{inspection_gid}"
             layer = QgsVectorLayer(uri, layer_name, "postgres")
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
-                # Optionnel : LayerStyler.apply_style(layer, "bcht.qml")
+                # Appliquer un style QML natif PyQGIS si le fichier existe
+                try:
+                    qml_path = os.path.join(os.path.dirname(__file__), 'styles', 'itv_details_bcht.qml')
+                    if os.path.exists(qml_path):
+                        layer.loadNamedStyle(qml_path)
+                        layer.triggerRepaint()
+                except Exception as e:
+                    self.log_info(f"Impossible d'appliquer le style QML : {e}")
             else:
                 QtWidgets.QMessageBox.critical(self, "Erreur", f"Impossible de charger la vue 'itv.v_itv_details_bcht' pour l'inspection {inspection_gid} dans QGIS.")
 
-            # Vue lines (optionnelle)
+            # Vue lines (orientation)
             sql_query_lines = f"(SELECT * FROM itv.v_itv_details_bcht_lines WHERE inspection_gid = {inspection_gid})"
             geom_column_lines = "geom"
-            srid_lines = 2154
             primary_key_lines = "id"
             uri_lines = (
                 f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
-                f"key='{primary_key_lines}' srid={srid_lines} type=LineString table=\"({sql_query_lines})\" ({geom_column_lines})"
+                f"key='{primary_key_lines}' type=LineString table=\"({sql_query_lines})\" ({geom_column_lines})"
             )
-            layer_name_lines = f"Details Bcht Lines {inspection_gid} - v_itv_details_bcht_lines"
+            layer_name_lines = f"itv_details_bcht_lines-{inspection_gid}"
             layer_lines = QgsVectorLayer(uri_lines, layer_name_lines, "postgres")
             if layer_lines.isValid():
                 QgsProject.instance().addMapLayer(layer_lines)
-                # Optionnel : LayerStyler.apply_style(layer_lines, "bcht_lines.qml")
-            # Pas d'erreur si la vue lines n'existe pas
+                # Appliquer un style QML natif PyQGIS si le fichier existe
+                try:
+                    qml_path = os.path.join(os.path.dirname(__file__), 'styles', 'itv_details_bcht_lines.qml')
+                    if os.path.exists(qml_path):
+                        result, error_msg = layer_lines.loadNamedStyle(qml_path)
+                        layer_lines.triggerRepaint()
+                except Exception as e:
+                    self.log_info(f"Impossible d'appliquer le style QML : {e}")
 
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors de l'affichage de la vue : {str(e)}")
@@ -663,7 +792,6 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         Charge les tables `ids_coll` et `ids_reg` dans QGIS pour une inspection donnée (sans géométrie, comme des tables CSV).
         Affiche également les données dans les logs/messages.
         """
-        # Chargement direct des tables ids_coll et ids_reg dans QGIS via PostgreSQL
         try:
 
             dbname = connection_params["dbname"]
@@ -672,31 +800,31 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             host = connection_params["host"]
             port = connection_params["port"]
 
-            # ids_coll
-            query_coll = f"(SELECT * FROM itv.ids_coll WHERE inspection_gid = {inspection_gid})"
-            uri_coll = (
-                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
-                f"table=\"{query_coll}\" sql= inspection_gid={inspection_gid}"
-            )
-            layer_coll = QgsVectorLayer(uri_coll, f"ids_coll - Inspection {inspection_gid}", "postgres")
-            if layer_coll.isValid() and layer_coll.featureCount() > 0:
-                QgsProject.instance().addMapLayer(layer_coll)
-                QtWidgets.QMessageBox.information(self, "Succès", f"Table 'ids_coll' pour l'inspection {inspection_gid} ajoutée à QGIS.")
-            else:
-                QtWidgets.QMessageBox.information(self, "Info", f"Aucune donnée trouvée ou impossible de charger 'ids_coll' pour inspection_gid={inspection_gid}.")
-
             # ids_reg
-            query_reg = f"(SELECT * FROM itv.ids_reg WHERE inspection_gid = {inspection_gid})"
+            query_reg = f"(SELECT * FROM itv.v_itv_physiq_reg WHERE inspection_gid = {inspection_gid})"
             uri_reg = (
                 f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
-                f"table=\"{query_reg}\" sql= inspection_gid={inspection_gid}"
+                f"key='gid' type=NONE table=\"{query_reg}\""
             )
             layer_reg = QgsVectorLayer(uri_reg, f"ids_reg - Inspection {inspection_gid}", "postgres")
             if layer_reg.isValid() and layer_reg.featureCount() > 0:
                 QgsProject.instance().addMapLayer(layer_reg)
-                QtWidgets.QMessageBox.information(self, "Succès", f"Table 'ids_reg' pour l'inspection {inspection_gid} ajoutée à QGIS.")
+                self.log_info(f"Table 'v_itv_physiq_reg' pour l'inspection {inspection_gid} ajoutée à QGIS. ({layer_reg.featureCount()} lignes, champs: {[f.name() for f in layer_reg.fields()]})")
             else:
-                QtWidgets.QMessageBox.information(self, "Info", f"Aucune donnée trouvée ou impossible de charger 'ids_reg' pour inspection_gid={inspection_gid}.")
+                self.log_info(f"Aucune donnée trouvée ou impossible de charger 'v_itv_physiq_reg' pour inspection_gid={inspection_gid}. (Champs: {[f.name() for f in layer_reg.fields()]})")
+
+            # ids_coll
+            query_coll = f"(SELECT * FROM itv.v_itv_physiq_coll WHERE inspection_gid = {inspection_gid})"
+            uri_coll = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"key='gid' type=NONE table=\"{query_coll}\""
+            )
+            layer_coll = QgsVectorLayer(uri_coll, f"ids_coll - Inspection {inspection_gid}", "postgres")
+            if layer_coll.isValid() and layer_coll.featureCount() > 0:
+                QgsProject.instance().addMapLayer(layer_coll)
+                self.log_info(f"Table 'v_itv_physiq_coll' pour l'inspection {inspection_gid} ajoutée à QGIS. ({layer_coll.featureCount()} lignes, champs: {[f.name() for f in layer_coll.fields()]})")
+            else:
+                self.log_info(f"Aucune donnée trouvée ou impossible de charger 'v_itv_physiq_coll' pour inspection_gid={inspection_gid}. (Champs: {[f.name() for f in layer_coll.fields()]})")
 
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors du chargement des tables : {str(e)}")
@@ -704,9 +832,14 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             pass
     
     def execute(self):
-
-        """Vérifie qu'une base de données est sélectionnée avant d'exécuter la suite."""
-        connexion = self.cbConnexionBDD.currentText()
+        """
+        Lance le traitement principal :
+        - Vérifie la sélection de la base
+        - Effectue chaque étape du workflow (suppression, import, calculs, affichage)
+        - Met à jour la progressBar à chaque étape clé
+        - Logue les étapes dans le textEdit_log
+        """
+        connexion = self.cmbConnexionBDD.currentText()
         if not connexion:
             QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune connexion sélectionnée.")
             return
@@ -725,42 +858,59 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             QtWidgets.QMessageBox.critical(self, "Erreur de connexion", f"Impossible de se connecter à la base de données : {str(e)}")
             return
 
+        error_happened = False
         try:
-            # Suppression des tables avant import
+            self.set_progress(0)  # Début du traitement
+            self.log_info("Début du traitement GeoITV.", True)
+            self.log_info("Suppression des tables temporaires et vidage de la table inspection...")
             self.clear_tables(conn)
+            self.set_progress(10)
 
-            # Import de la couche regard
+            self.log_info("Import de la couche regard...")
             self.import_layer_regard(connection_params)
+            self.set_progress(20)
 
-            # Import de la couche collecteur
+            self.log_info("Import de la couche collecteur...")
             self.import_layer_collecteur(connection_params)
+            self.set_progress(30)
 
-            # Import des données du fichier TXT (ITV) et recupération de l'ID de l'inspection
+            self.log_info("Import des données du fichier TXT ITV...")
             inspection_gid = self.import_txt_data(conn)
+            self.set_progress(50)
 
-            # Affectation des identifiants SIG
+            self.log_info("Affectation des identifiants SIG...")
             self.set_id_sig(conn, inspection_gid)
+            self.set_progress(60)
 
-            # Mise à jour des identifiants si fichier de correspondance regard fourni
+            self.log_info("Mise à jour des correspondances regard (si CSV fourni)...")
             self.update_ids_reg_from_csv(conn, inspection_gid)
+            self.set_progress(70)
 
-            # Mise à jour des identifiants si fichier de correspondance collecteur fourni
+            self.log_info("Mise à jour des correspondances collecteur (si CSV fourni)...")
             self.update_ids_coll_from_csv(conn, inspection_gid)
+            self.set_progress(75)
 
-            # Affichage des résultats
-            # - emprise (polygon) : emprise de l'inspection
-            # - details (points) : observations géolocalisées
-            # - bcht orientation (lines) : orientation des branchements
-            # - bcht (points) : branchements
+            self.log_info("Affichage des résultats (couches et tables)...")
             self.display_v_inspection_view(connection_params, inspection_gid)
+            self.set_progress(80)
             self.display_v_itv_details_geom_view(connection_params, inspection_gid)
+            self.set_progress(85)
             self.display_v_itv_details_bcht_view(connection_params, inspection_gid)
+            self.set_progress(90)
 
-            # Affichage des tables d'identifiants
             self.load_ids_tables(connection_params, inspection_gid)
+            self.set_progress(100)  # Fin du traitement
+        except Exception as e:
+            error_happened = True
+            self.log_info(f"Erreur lors du traitement : {e}")
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors du traitement : {e}")
         finally:
             if conn is not None:
                 try:
                     conn.close()
                 except Exception:
                     pass
+            if error_happened:
+                self.log_info("Traitement terminé avec erreurs.")
+            else:
+                self.log_info("Traitement terminé avec succès.")

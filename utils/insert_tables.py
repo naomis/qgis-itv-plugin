@@ -15,12 +15,16 @@ def insert_b01_table(self, cursor, passage_gid, b01_data):
         parsed_columns = b01_data["columns"]
         column_index_map = {col: parsed_columns.index(col) for col in parsed_columns if col in expected_columns}
 
+        def clean_numeric(val):
+            if isinstance(val, str) and val.strip() == "":
+                return None
+            return val
+
         for row in b01_data["rows"]:
             values = [
-                row[column_index_map[col]] if col in column_index_map else None
+                clean_numeric(row[column_index_map[col]]) if col in column_index_map else None
                 for col in expected_columns
             ]
-
             values.append(passage_gid)
             cursor.execute(b01_query, values)
             b01_gid = cursor.fetchone()[0] 
@@ -48,9 +52,14 @@ def insert_b02_table(self, cursor, passage_gid, b02_data):
         expected_columns = ["ABA", "ABB", "ABC", "ABD", "ABE", "ABF", "ABG", "ABH", "ABI", "ABJ", "ABK", "ABL", "ABM", "ABN", "ABO", "ABP", "ABQ", "ABR", "ABS", "ABT"]
         parsed_columns = b02_data["columns"]
         column_index_map = {col: parsed_columns.index(col) for col in parsed_columns if col in expected_columns}
+        def clean_numeric(val):
+            if isinstance(val, str) and val.strip() == "":
+                return None
+            return val
+
         for row in b02_data["rows"]:
             values = [
-                row[column_index_map[col]] if col in column_index_map else None
+                clean_numeric(row[column_index_map[col]]) if col in column_index_map else None
                 for col in expected_columns
             ]
             values.append(passage_gid)
@@ -79,9 +88,14 @@ def insert_b03_table(self, cursor, passage_gid, b03_data):
         expected_columns = ["ACA", "ACB", "ACC", "ACD", "ACE", "ACF", "ACG", "ACH", "ACI", "ACJ", "ACK", "ACL", "ACM", "ACN"]
         parsed_columns = b03_data["columns"]
         column_index_map = {col: parsed_columns.index(col) for col in parsed_columns if col in expected_columns}
+        def clean_numeric(val):
+            if isinstance(val, str) and val.strip() == "":
+                return None
+            return val
+
         for row in b03_data["rows"]:
             values = [
-                row[column_index_map[col]] if col in column_index_map else None
+                clean_numeric(row[column_index_map[col]]) if col in column_index_map else None
                 for col in expected_columns
             ]
             values.append(passage_gid)
@@ -110,9 +124,14 @@ def insert_b04_table(self, cursor, passage_gid, b04_data):
         expected_columns = ["ADA", "ADB", "ADC", "ADD", "ADE"]
         parsed_columns = b04_data["columns"]
         column_index_map = {col: parsed_columns.index(col) for col in parsed_columns if col in expected_columns}
+        def clean_numeric(val):
+            if isinstance(val, str) and val.strip() == "":
+                return None
+            return val
+
         for row in b04_data["rows"]:
             values = [
-                row[column_index_map[col]] if col in column_index_map else None
+                clean_numeric(row[column_index_map[col]]) if col in column_index_map else None
                 for col in expected_columns
             ]
             values.append(passage_gid)
@@ -150,15 +169,17 @@ def insert_c_table(self, cursor, passage_gid, c_data):
         column_index_map = {col: parsed_columns.index(col) for col in parsed_columns if col in expected_columns}
 
         # Insérer chaque ligne de données dans la table `C`
+        def clean_numeric(val):
+            if isinstance(val, str) and val.strip() == "":
+                return None
+            return val
+
         for row in c_data["rows"]:
             values = [
-                row[column_index_map[col]] if col in column_index_map else None
+                clean_numeric(row[column_index_map[col]]) if col in column_index_map else None
                 for col in expected_columns
             ]
-
-            # Ajouter `passage_gid` à la fin des valeurs
             values.append(passage_gid)
-            # Exécuter la requête d'insertion
             cursor.execute(c_query, values)
             c_gid = cursor.fetchone()[0]  # Récupère l'ID généré pour la ligne
 
