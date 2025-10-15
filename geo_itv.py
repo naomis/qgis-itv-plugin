@@ -243,7 +243,15 @@ class GeoITV:
         dlg.exec_()
 
     def show_help(self):
-        QDesktopServices.openUrl(QUrl("https://votre-url-aide-ou-doc.fr"))
+        import os
+        from qgis.PyQt.QtWidgets import QMessageBox
+        # Chemin absolu vers la doc locale
+        doc_path = os.path.join(self.plugin_dir, 'help', 'build', 'html', 'index.html')
+        if os.path.exists(doc_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(doc_path))
+        else:
+            # Fallback : doc en ligne si la locale n'existe pas
+            QDesktopServices.openUrl(QUrl("https://votre-url-aide-ou-doc.fr"))
 
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""

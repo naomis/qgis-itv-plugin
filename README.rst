@@ -1,23 +1,20 @@
 .. GeoITV documentation master file, created by
    sphinx-quickstart on Sun Feb 12 17:11:03 2012.
+   You can adapt this file completely to your liking, but it should at least
+   contain the root `toctree` directive.
 
-Bienvenue dans la documentation du plugin GeoITV !
-==================================================
+Welcome to GeoITV's documentation!
+============================================
 
-GeoITV est un plugin QGIS permettant de géolocaliser automatiquement les branchements et défauts observés lors d’une inspection télévisée (ITV) à partir d’un fichier TXT normé (NF EN 13508-2+A1).
+Contents:
 
 .. toctree::
    :maxdepth: 2
-   :caption: Sommaire
 
-   presentation
-   installation
-   utilisation
-   api
-
-Indices et tables
-=================
+Indices and tables
+==================
 
 * :ref:`genindex`
 * :ref:`modindex`
 * :ref:`search`
+
