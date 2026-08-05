@@ -419,6 +419,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         cursor = None
         total = len(passages)
+
         try:
             cursor = conn.cursor()
             query = """
@@ -430,7 +431,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
 
             for idx, passage in enumerate(passages, 1):
                 n_passage = passage.get("n_passage")
-                self.log_info(f"Insertion du passage n°{n_passage} ({idx}/{total})...")
+                self.log_info(f"Insertion du passage n°{n_passage} ({idx}/{total})... !")
                 cursor.execute(query, (n_passage, inspection_gid))
                 passage_gid = cursor.fetchone()[0]
 
@@ -481,6 +482,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             parsed_data = parser.parse(file_path)
             metadata = parsed_data["metadata"]
             passages = parsed_data["passages"]
+            details = parsed_data["details"]
 
             inspection_gid = self.insert_metadata(conn, file_path, metadata)
             if inspection_gid:
@@ -494,7 +496,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         finally:
             pass
 
-        return inspection_gid
+        return inspection_gid, details
 
     def set_id_sig(self, conn, inspection_gid):
         """
@@ -875,7 +877,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             self.set_progress(30)
 
             self.log_info("Import des données du fichier TXT ITV...")
-            inspection_gid = self.import_txt_data(conn)
+            inspection_gid, details = self.import_txt_data(conn)
             self.set_progress(50)
 
             self.log_info("Affectation des identifiants SIG...")
