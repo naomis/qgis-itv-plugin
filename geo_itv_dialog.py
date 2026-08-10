@@ -28,8 +28,10 @@ from qgis.core import QgsSettings, QgsProject, QgsVectorFileWriter, QgsVectorLay
 
 from .utils.file_parser import FileParser
 from .utils.insert_tables import insert_b01_table, insert_b02_table, insert_b03_table, insert_b04_table, insert_c_table
+from .geo_itv_data import IDS
 
 import psycopg2
+import csv
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 import os
@@ -525,65 +527,74 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         csv_path = self.inputFileCSV_regard.filePath()
         if not csv_path or not os.path.exists(csv_path):
             self.log_info("Aucun fichier CSV de correspondance regard accessible. Opération ignorée.")
-            return
+            return []
 
         cursor = None
         try:
             correspondance_data = {}
-            with open(csv_path, "r", encoding="utf-8") as f:
+
+            with open(csv_path, "r", encoding="utf-8-sig") as f:
                 first_line = f.readline()
+
                 if "\t" in first_line and "," not in first_line and ";" not in first_line:
                     sep = "\t"
                 elif ";" in first_line and "," not in first_line:
                     sep = ";"
                 else:
                     sep = ","
+
                 headers = [h.strip() for h in first_line.strip().split(sep)]
 
-                id_regard_col = "id_regard" if "id_regard" in headers else ("id_itv" if "id_itv" in headers else None)
-                if not id_regard_col or "id_sig" not in headers:
-                    QtWidgets.QMessageBox.critical(self, "Erreur", "Le CSV doit contenir 'id_regard' ou 'id_itv' et 'id_sig'.")
-                    return
+                if "id_itv" not in headers or "id_sig" not in headers:
+                    raise ValueError("Le CSV doit contenir les colonnes 'id_itv' et 'id_sig'.")
 
-                id_regard_index = headers.index(id_regard_col)
+                id_itv_index = headers.index("id_itv")
                 id_sig_index = headers.index("id_sig")
 
                 for line in f:
                     if not line.strip():
                         continue
+
                     values = [v.strip() for v in line.strip().split(sep)]
-                    if len(values) <= max(id_regard_index, id_sig_index):
+                    if len(values) <= max(id_itv_index, id_sig_index):
                         continue
-                    id_regard = values[id_regard_index]
-                    id_sig = values[id_sig_index] if id_sig_index < len(values) else None
-                    if id_regard:
-                        id_regard = id_regard.strip('"')
-                    if id_sig:
-                        id_sig = id_sig.strip('"')
-                    if id_regard and id_sig:
-                        correspondance_data[id_regard] = id_sig
+
+                    id_itv = values[id_itv_index].strip('"')
+                    id_sig = values[id_sig_index].strip('"')
+
+                    if id_itv and id_sig:
+                        correspondance_data[id_itv] = id_sig
 
             cursor = conn.cursor()
 
-            for id_regard, id_sig in correspondance_data.items():
+            for id_itv, id_sig in correspondance_data.items():
                 update_query = """
                     UPDATE itv.ids_reg
                     SET id_sig = %s
-                    WHERE id_sig IS NULL AND inspection_gid = %s AND id_itv = %s
+                    WHERE inspection_gid = %s
+                    AND id_itv = %s
                 """
-                cursor.execute(update_query, (id_sig, inspection_gid, id_regard))
+                cursor.execute(update_query, (id_sig, inspection_gid, id_itv))
 
             conn.commit()
-            self.log_info("Correspondances regard mises à jour avec succès.")
+            self.log_info(f"Correspondances regard mises à jour avec succès ({len(correspondance_data)} lignes).")
+            return correspondance_data
+
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de la mise à jour de la table itv.ids_reg : {str(e)}")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Erreur",
+                f"Erreur lors de la mise à jour de la table itv.ids_reg : {str(e)}"
+            )
+            return []
+
         finally:
             if cursor is not None:
                 try:
                     cursor.close()
                 except Exception:
-                    pass
-
+                    pass    
+                
     def update_ids_coll_from_csv(self, conn, inspection_gid):
         """
         Met à jour la colonne id_sig dans itv.ids_coll à partir d'un CSV si fichier de correspondance collecteur fourni.
@@ -634,7 +645,6 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                     WHERE id_sig IS NULL AND inspection_gid = %s AND id_itv = %s
                 """
                 cursor.execute(update_query, (id_sig, inspection_gid, id_troncon))
-
             conn.commit()
             self.log_info("Correspondances collecteur mises à jour avec succès.")
         except Exception as e:
@@ -645,7 +655,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                     cursor.close()
                 except Exception:
                     pass
-    
+                
     def display_v_inspection_view(self, connection_params, inspection_gid):
         """
         Affiche dans QGIS la vue SQL `itv.v_inspection` pour une inspection donnée et zoome sur l'emprise de la couche.
