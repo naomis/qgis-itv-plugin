@@ -29,6 +29,8 @@ from qgis.core import QgsSettings, QgsProject, QgsVectorFileWriter, QgsVectorLay
 from .utils.file_parser import FileParser
 from .utils.insert_tables import insert_b01_table, insert_b02_table, insert_b03_table, insert_b04_table, insert_c_table
 from .geo_itv_data import IDS
+from .defect_position import DefectGeometryCalculator
+USE_DB_VIEWS = False
 
 import psycopg2
 import csv
@@ -466,40 +468,49 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                     cursor.close()
                 except Exception:
                     pass
-
     def import_txt_data(self, conn):
         """
         Charge les données extraites du fichier TXT dans la base de données.
+        Retourne TOUJOURS (inspection_gid, details), même en cas d'erreur.
         """
-
         file_path = self.inputFileTXT.filePath()
-
         if not file_path:
             QtWidgets.QMessageBox.critical(self, "Erreur", "Veuillez sélectionner un fichier TXT avant de continuer.")
-            return
+            return None, [] 
 
         inspection_gid = None
+        details = []  
+
         try:
             parser = FileParser()
             parsed_data = parser.parse(file_path)
-            metadata = parsed_data["metadata"]
-            passages = parsed_data["passages"]
-            details = parsed_data["details"]
+
+            metadata = parsed_data.get("metadata", {})
+            passages = parsed_data.get("passages", [])
+            details = parsed_data.get("details", [])  
 
             inspection_gid = self.insert_metadata(conn, file_path, metadata)
             if inspection_gid:
                 self.insert_data(conn, inspection_gid, passages)
                 self.log_info("Processus d'importation terminé avec succès.")
             else:
-                QtWidgets.QMessageBox.critical(self, "Erreur", "Erreur lors de l'insertion des métadonnées. Processus interrompu.")
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Erreur",
+                    "Erreur lors de l'insertion des métadonnées. Processus interrompu."
+                )
+                details = []  
 
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'importation des données : {str(e)}")
-        finally:
-            pass
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Erreur",
+                f"Erreur lors de l'importation des données : {str(e)}"
+            )
+            details = []  
 
-        return inspection_gid, details
-
+        return inspection_gid, details  
+    
     def set_id_sig(self, conn, inspection_gid):
         """
         Exécute la fonction SQL `itv.set_id_sig` sur la base de données et affiche un message de succès.
@@ -842,6 +853,63 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors du chargement des tables : {str(e)}")
         finally:
             pass
+
+    def calculate_and_show_defect_positions(self):
+        """Calcule et ajoute la couche des défauts au projet à partir de `self.details`."""
+        try:
+            if not hasattr(self, 'details') or not self.details:
+                self.log_info("Aucune donnée ITV chargée (details manquants) : pas de calcul des positions des défauts.")
+                return
+
+            layer_regard = self.mapLayerComboBox_regard.currentLayer() if hasattr(self, 'mapLayerComboBox_regard') else None
+
+            if not layer_regard:
+                self.log_info("Couche regard non sélectionnée : impossibilité de calculer les défauts.")
+                return
+
+            layer_collecteur = self.mapLayerComboBox_collecteur.currentLayer() if hasattr(self, 'mapLayerComboBox_collecteur') else None
+
+            self.log_info("Calcul des positions des défauts...")
+
+            defects_list = []
+            for detail in self.details:
+                if not hasattr(detail, 'defauts') or not detail.defauts:
+                    continue
+                for d in detail.defauts:
+                    defect = {
+                        'gid': getattr(d, 'gid', None) or 0,
+                        'code_obs': getattr(d, 'code_obs', None) or '',
+                        'libel_obs': getattr(d, 'libel_obs', None) or '',
+                        'metrage': getattr(d, 'metrage', None),
+                        'id_reg_ent': getattr(d, 'id_reg_ent', None),
+                        'id_reg_sor': getattr(d, 'id_reg_sor', None),
+                        'id_troncon': getattr(d, 'id_troncon', None),
+                    }
+                    defects_list.append(defect)
+
+            if not defects_list:
+                self.log_info("Aucun défaut à géolocaliser.")
+                return
+
+            calc = DefectGeometryCalculator(iface=getattr(self, 'iface', None))
+
+            layer_defauts = calc.get_defect_positions(
+                defects_list,
+                layer_regard,
+                layer_collecteur,  
+                id_field_regard=(self.fieldComboBox_regard.currentText() if hasattr(self, 'fieldComboBox_regard') else 'id'),
+                id_field_collecteur=(self.fieldComboBox_collecteur.currentText() if hasattr(self, 'fieldComboBox_collecteur') else 'id')
+            )
+
+            if layer_defauts and layer_defauts.isValid():
+                QgsProject.instance().addMapLayer(layer_defauts)
+                self.log_info("Couche des défauts ajoutée au projet.")
+            else:
+                self.log_info("Impossible de générer la couche des défauts.")
+
+        except Exception as e:
+            self.log_info(f"Erreur lors du calcul/affichage des défauts : {e}")
+        
     
     def execute(self):
         """
@@ -867,13 +935,21 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 port=connection_params["port"]
             )
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Erreur de connexion", f"Impossible de se connecter à la base de données : {str(e)}")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Erreur de connexion",
+                f"Impossible de se connecter à la base de données : {str(e)}"
+            )
             return
 
         error_happened = False
+        details = []
+        inspection_gid = None
+
         try:
-            self.set_progress(0)  # Début du traitement
+            self.set_progress(0)
             self.log_info("Début du traitement GeoITV.", True)
+
             self.log_info("Suppression des tables temporaires et vidage de la table inspection...")
             self.clear_tables(conn)
             self.set_progress(10)
@@ -888,6 +964,18 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
 
             self.log_info("Import des données du fichier TXT ITV...")
             inspection_gid, details = self.import_txt_data(conn)
+
+            if inspection_gid is None:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Erreur",
+                    "Impossible de récupérer l'ID de l'inspection. Vérifiez les données du fichier TXT."
+                )
+                error_happened = True
+                return
+
+            self.inspection_gid = inspection_gid
+            self.details = details
             self.set_progress(50)
 
             self.log_info("Affectation des identifiants SIG...")
@@ -903,15 +991,21 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             self.set_progress(75)
 
             self.log_info("Affichage des résultats (couches et tables)...")
-            self.display_v_inspection_view(connection_params, inspection_gid)
-            self.set_progress(80)
-            self.display_v_itv_details_geom_view(connection_params, inspection_gid)
-            self.set_progress(85)
-            self.display_v_itv_details_bcht_view(connection_params, inspection_gid)
-            self.set_progress(90)
+            if USE_DB_VIEWS:
+                self.display_v_inspection_view(connection_params, inspection_gid)
+                self.set_progress(80)
+                self.display_v_itv_details_geom_view(connection_params, inspection_gid)
+                self.set_progress(85)
+                self.display_v_itv_details_bcht_view(connection_params, inspection_gid)
+                self.set_progress(90)
+            else:
+                self.log_info("Chargement des vues SQL désactivé (USE_DB_VIEWS=False) — saut des affichages SQL.")
+                self.set_progress(90)
 
+            self.calculate_and_show_defect_positions()
             self.load_ids_tables(connection_params, inspection_gid)
-            self.set_progress(100)  # Fin du traitement
+            self.set_progress(100)
+
         except Exception as e:
             error_happened = True
             self.log_info(f"Erreur lors du traitement : {e}")
