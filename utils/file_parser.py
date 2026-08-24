@@ -3,11 +3,12 @@ from typing import Optional, Dict, List, Any
 from ..geo_itv_data import TableB, TableC, Detail, DefautDetecte
 
 
-B01_FIELD_TRONCON = "AAA"     
-B01_FIELD_REG_AMONT = "AAB"   
-B01_FIELD_REG_AVAL = "AAF"    
-C_FIELD_METRAGE = "I"   
-C_FIELD_CODE_OBS = "A"   
+B01_FIELD_TRONCON = "AAA"
+B01_FIELD_REG_AMONT = "AAB"
+B01_FIELD_REG_AVAL = "AAF"
+C_FIELD_METRAGE = "I"
+C_FIELD_CODE_OBS = "A"
+
 
 class FileParser:
     """
@@ -30,8 +31,8 @@ class FileParser:
 
         metadata = self.parse_metadata(lines[:6])
 
-        final_data: List[Dict[str, Any]] = [{"n_passage": 1, "tables": {}}]  
-        details: List[Detail] = [Detail(n_passage=1)]  
+        final_data: List[Dict[str, Any]] = [{"n_passage": 1, "tables": {}}]
+        details: List[Detail] = [Detail(n_passage=1)]
         current_detail = details[0]
 
         index = 1
@@ -82,9 +83,8 @@ class FileParser:
                     for column, value in zip(current_columns, values):
                         if hasattr(b_row, column):
                             setattr(b_row, column, value)
-                    current_detail.add_b_row(b_row)  
+                    current_detail.add_b_row(b_row)
 
-                    
                     if current_table_name == "#B01":
                         current_detail.id_reg_ent = self._clean_id(
                             getattr(b_row, B01_FIELD_REG_AMONT, None)
@@ -101,23 +101,40 @@ class FileParser:
                     for column, value in zip(current_columns, values):
                         if hasattr(c_row, column):
                             setattr(c_row, column, value)
-                    current_detail.add_c_row(c_row) 
-                   
+                    current_detail.add_c_row(c_row)
+
                     code_obs = getattr(c_row, C_FIELD_CODE_OBS, None)
                     if code_obs:
+                        code_obs = code_obs.strip().strip('"')
+
+                        # DEBUG temporaire : écrit chaque code_obs lu dans un fichier
+                        try:
+                            with open(r"C:\temp\geo_itv_debug.txt", "a", encoding="utf-8") as dbg:
+                                dbg.write(f"code_obs={code_obs!r} colonnes={current_columns!r} valeurs={values!r}\n")
+                        except Exception as e:
+                            pass
+
+                        metrage = self._parse_metrage(
+                            getattr(c_row, C_FIELD_METRAGE, None),
+                            metadata["decimalSeparator"],
+                        )
+
+                        current_detail.code_obs = code_obs
+                        current_detail.metrage = metrage
+                        current_detail.fam_obs = code_obs
+                        current_detail.libel_obs = None
+
                         defaut = DefautDetecte(
                             code_obs=code_obs,
-                            metrage=self._parse_metrage(
-                                getattr(c_row, C_FIELD_METRAGE, None),
-                                metadata["decimalSeparator"],
-                            ),
+                            metrage=metrage,
+                            fam_obs=code_obs,
                         )
                         current_detail.add_defaut(defaut)
 
         return {
             "metadata": metadata,
-            "passages": final_data, 
-            "details": details,     
+            "passages": final_data,
+            "details": details,
         }
 
     def parse_line(self, line: str, delimiter: str, quote_char: str) -> List[str]:

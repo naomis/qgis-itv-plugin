@@ -30,7 +30,7 @@ from .utils.file_parser import FileParser
 from .utils.insert_tables import insert_b01_table, insert_b02_table, insert_b03_table, insert_b04_table, insert_c_table
 from .geo_itv_data import IDS
 from .defect_position import DefectGeometryCalculator
-USE_DB_VIEWS = False
+from .branch_position import BranchGeometryCalculator
 
 import psycopg2
 import csv
@@ -40,6 +40,7 @@ import os
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'geo_itv_dialog_base.ui'))
 
+USE_DB_VIEWS = False
 
 class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
     def set_progress(self, value):
@@ -909,7 +910,118 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
 
         except Exception as e:
             self.log_info(f"Erreur lors du calcul/affichage des défauts : {e}")
-        
+
+    def calculate_and_show_branch_positions(self):
+        """
+        Calcule et ajoute la couche des branchements (BCA) au projet QGIS
+        à partir des informations contenues dans self.details.
+
+        La couche collecteur est optionnelle :
+        - si elle est fournie, l'interpolation se fait le long du tronçon ;
+        - sinon, elle se fait par interpolation entre les deux regards.
+        """
+
+        try:
+           
+            if not hasattr(self, "details") or not self.details:
+                self.log_info(
+                    "Aucune donnée ITV chargée (details manquants) : "
+                    "pas de calcul des positions des branchements."
+                )
+                return
+
+
+            layer_regard = (
+                self.mapLayerComboBox_regard.currentLayer()
+                if hasattr(self, "mapLayerComboBox_regard")
+                else None
+            )
+
+            if not layer_regard:
+                self.log_info(
+                    "Couche regard non sélectionnée : "
+                    "impossibilité de calculer les branchements."
+                )
+                return
+
+
+            layer_collecteur = (
+                self.mapLayerComboBox_collecteur.currentLayer()
+                if hasattr(self, "mapLayerComboBox_collecteur")
+                else None
+            )
+
+            if not layer_collecteur:
+                self.log_info(
+                    "Couche collecteur non sélectionnée : "
+                    "calcul des branchements par interpolation entre regards."
+                )
+            else:
+                self.log_info("Calcul des positions des branchements...")
+
+            
+            flat_defauts = []
+            for detail in self.details:
+                for defaut in getattr(detail, "defauts", []) or []:
+                    flat_defauts.append(defaut)
+
+            nb_bca = sum(
+                1 for d in flat_defauts
+                if getattr(d, "fam_obs", None) == "BCA"
+            )
+
+            if nb_bca == 0:
+                self.log_info(
+                    "Aucun branchement BCA trouvé dans les données importées."
+                )
+                return
+
+            self.log_info(
+                f"{nb_bca} branchement(s) BCA trouvé(s) dans les défauts."
+            )
+
+            
+            id_field_regard = (
+                self.fieldComboBox_regard.currentText()
+                if hasattr(self, "fieldComboBox_regard")
+                else "id"
+            )
+
+            id_field_collecteur = (
+                self.fieldComboBox_collecteur.currentText()
+                if hasattr(self, "fieldComboBox_collecteur")
+                else "id"
+            )
+
+            self.log_info(f"Champ identifiant regard : {id_field_regard}")
+
+            if layer_collecteur:
+                self.log_info(
+                    f"Champ identifiant collecteur : {id_field_collecteur}"
+                )
+
+            
+            calc = BranchGeometryCalculator(
+                iface=getattr(self, "iface", None)
+            )
+
+            layer_troncons = calc.get_branch_positions(
+                flat_defauts,
+                layer_regard,
+                layer_collecteur,
+                id_field_regard=id_field_regard,
+                id_field_collecteur=id_field_collecteur,
+            )
+
+            
+            if layer_troncons and layer_troncons.isValid():
+                QgsProject.instance().addMapLayer(layer_troncons)
+                self.log_info("Couche des branchements ajoutée au projet.")
+            else:
+                self.log_info("Impossible de générer la couche des branchements.")
+
+        except Exception as e:
+            self.log_info(f"Erreur lors du calcul/affichage des branchements : {e}")
     
     def execute(self):
         """
@@ -1003,6 +1115,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.set_progress(90)
 
             self.calculate_and_show_defect_positions()
+            self.set_progress(95)
+            self.calculate_and_show_branch_positions()
             self.load_ids_tables(connection_params, inspection_gid)
             self.set_progress(100)
 
