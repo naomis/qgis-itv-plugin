@@ -21,16 +21,22 @@
  *                                                                         *
  ***************************************************************************/
 """
-from qgis.PyQt import uic
-from qgis.PyQt import QtWidgets
+from qgis.PyQt import uic, QtWidgets
 
-from qgis.core import QgsSettings, QgsProject, QgsVectorFileWriter, QgsVectorLayer
+from qgis.core import (
+    QgsSettings,
+    QgsProject,
+    QgsVectorFileWriter,
+    QgsVectorLayer,
+    QgsFillSymbol,
+)
 
 from .utils.file_parser import FileParser
 from .utils.insert_tables import insert_b01_table, insert_b02_table, insert_b03_table, insert_b04_table, insert_c_table
 from .geo_itv_data import IDS
 from .defect_position import DefectGeometryCalculator
 from .branch_position import BranchGeometryCalculator
+from .inspection_data import InspectionGeometryCalculator
 
 import psycopg2
 import csv
@@ -1022,7 +1028,128 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
 
         except Exception as e:
             self.log_info(f"Erreur lors du calcul/affichage des branchements : {e}")
-    
+
+
+    def calculate_and_show_inspection_geometry(self):
+        """
+        Calcule et affiche le rectangle englobant de l'inspection
+        avec un remplissage semi-transparent.
+        """
+        try:
+            inspection_gid = getattr(self, "inspection_gid", None)
+
+            if inspection_gid is None:
+                self.log_info(
+                    "Aucun identifiant d'inspection disponible."
+                )
+                return
+
+            if not hasattr(self, "details") or not self.details:
+                self.log_info(
+                    "Aucune donnée ITV chargée."
+                )
+                return
+
+            layer_regard = (
+                self.mapLayerComboBox_regard.currentLayer()
+                if hasattr(self, "mapLayerComboBox_regard")
+                else None
+            )
+
+            if not layer_regard or not layer_regard.isValid():
+                self.log_info(
+                    "Couche regard non sélectionnée ou invalide."
+                )
+                return
+
+            layer_collecteur = (
+                self.mapLayerComboBox_collecteur.currentLayer()
+                if hasattr(self, "mapLayerComboBox_collecteur")
+                else None
+            )
+
+            id_field_regard = (
+                self.fieldComboBox_regard.currentText()
+                if hasattr(self, "fieldComboBox_regard")
+                and self.fieldComboBox_regard.currentIndex() != -1
+                else "id"
+            )
+
+            id_field_collecteur = (
+                self.fieldComboBox_collecteur.currentText()
+                if hasattr(self, "fieldComboBox_collecteur")
+                and self.fieldComboBox_collecteur.currentIndex() != -1
+                else "id"
+            )
+
+            self.log_info(
+                "Calcul de la géométrie de l'inspection..."
+            )
+
+            calc = InspectionGeometryCalculator(
+                iface=getattr(self, "iface", None)
+            )
+
+            layer_inspection = calc.get_inspection_geometry(
+                inspection_gid,
+                self.details,
+                layer_regard,
+                layer_collecteur,
+                id_field_regard=id_field_regard,
+                id_field_collecteur=id_field_collecteur,
+            )
+
+            if not layer_inspection or not layer_inspection.isValid():
+                self.log_info(
+                    "Aucune géométrie d'inspection générée."
+                )
+                return
+
+            layer_inspection.setName(
+                f"itv_inspection_geometry-{inspection_gid}"
+            )
+
+            # ----------------------------------------------------------
+            # Style du rectangle
+            # ----------------------------------------------------------
+            symbol = QgsFillSymbol.createSimple({
+                "color": "255,165,0,70",
+                "outline_color": "255,140,0,255",
+                "outline_width": "0.8"
+            })
+
+            layer_inspection.renderer().setSymbol(symbol)
+            layer_inspection.triggerRepaint()
+
+            # ----------------------------------------------------------
+            # Ajout au projet
+            # ----------------------------------------------------------
+            QgsProject.instance().addMapLayer(layer_inspection)
+
+            # ----------------------------------------------------------
+            # Zoom
+            # ----------------------------------------------------------
+            iface = getattr(self, "iface", None)
+
+            if iface is not None:
+                try:
+                    canvas = iface.mapCanvas()
+                    canvas.setExtent(layer_inspection.extent())
+                    canvas.refresh()
+                except Exception as e:
+                    self.log_info(
+                        f"Impossible de zoomer sur l'inspection : {e}"
+                    )
+
+            self.log_info(
+                f"Rectangle de l'inspection {inspection_gid} ajouté au projet."
+            )
+
+        except Exception as e:
+            self.log_info(
+                f"Erreur lors du calcul de la géométrie d'inspection : {e}"
+            )
+
     def execute(self):
         """
         Lance le traitement principal :
@@ -1114,6 +1241,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.log_info("Chargement des vues SQL désactivé (USE_DB_VIEWS=False) — saut des affichages SQL.")
                 self.set_progress(90)
 
+            self.calculate_and_show_inspection_geometry()
+            self.set_progress(92)
             self.calculate_and_show_defect_positions()
             self.set_progress(95)
             self.calculate_and_show_branch_positions()
