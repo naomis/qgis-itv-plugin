@@ -37,16 +37,17 @@ from .geo_itv_data import IDS
 from .defect_position import DefectGeometryCalculator
 from .branch_position import BranchGeometryCalculator
 from .inspection_data import InspectionGeometryCalculator
+from .branch_lines import BcaGeometryCalculator
+
 
 import psycopg2
-import csv
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 import os
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'geo_itv_dialog_base.ui'))
 
-USE_DB_VIEWS = False
+USE_DB_VIEWS = False 
 
 class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
     def set_progress(self, value):
@@ -918,116 +919,138 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             self.log_info(f"Erreur lors du calcul/affichage des défauts : {e}")
 
     def calculate_and_show_branch_positions(self):
-        """
-        Calcule et ajoute la couche des branchements (BCA) au projet QGIS
-        à partir des informations contenues dans self.details.
+        """Calcule et affiche les flèches BCA via ``BcaGeometryCalculator``.
 
-        La couche collecteur est optionnelle :
-        - si elle est fournie, l'interpolation se fait le long du tronçon ;
-        - sinon, elle se fait par interpolation entre les deux regards.
+        Cette méthode est volontairement simple : elle ne fait plus appel à
+        ``BranchGeometryCalculator`` ni à une variable globale ``iface``.
+        Elle prépare uniquement les géométries QGIS puis délègue la création
+        des entités et des flèches à ``branch_lines.py``.
         """
-
         try:
-           
-            if not hasattr(self, "details") or not self.details:
-                self.log_info(
-                    "Aucune donnée ITV chargée (details manquants) : "
-                    "pas de calcul des positions des branchements."
-                )
+            if not getattr(self, "details", None):
+                self.log_info("Aucune donnée ITV chargée : pas de BCA à afficher.")
                 return
 
-
-            layer_regard = (
-                self.mapLayerComboBox_regard.currentLayer()
-                if hasattr(self, "mapLayerComboBox_regard")
-                else None
-            )
-
-            if not layer_regard:
-                self.log_info(
-                    "Couche regard non sélectionnée : "
-                    "impossibilité de calculer les branchements."
-                )
+            layer_regard = self.mapLayerComboBox_regard.currentLayer()
+            if layer_regard is None or not layer_regard.isValid():
+                self.log_info("Couche regard non sélectionnée ou invalide.")
                 return
-
 
             layer_collecteur = (
                 self.mapLayerComboBox_collecteur.currentLayer()
-                if hasattr(self, "mapLayerComboBox_collecteur")
-                else None
+                if hasattr(self, "mapLayerComboBox_collecteur") else None
             )
 
-            if not layer_collecteur:
-                self.log_info(
-                    "Couche collecteur non sélectionnée : "
-                    "calcul des branchements par interpolation entre regards."
-                )
-            else:
-                self.log_info("Calcul des positions des branchements...")
-
-            
-            flat_defauts = []
-            for detail in self.details:
-                for defaut in getattr(detail, "defauts", []) or []:
-                    flat_defauts.append(defaut)
-
-            nb_bca = sum(
-                1 for d in flat_defauts
-                if getattr(d, "fam_obs", None) == "BCA"
-            )
-
-            if nb_bca == 0:
-                self.log_info(
-                    "Aucun branchement BCA trouvé dans les données importées."
-                )
-                return
-
-            self.log_info(
-                f"{nb_bca} branchement(s) BCA trouvé(s) dans les défauts."
-            )
-
-            
             id_field_regard = (
                 self.fieldComboBox_regard.currentText()
-                if hasattr(self, "fieldComboBox_regard")
-                else "id"
+                if hasattr(self, "fieldComboBox_regard") and self.fieldComboBox_regard.currentIndex() >= 0
+                else None
             )
+            if not id_field_regard:
+                self.log_info("Champ identifiant regard non sélectionné.")
+                return
 
-            id_field_collecteur = (
-                self.fieldComboBox_collecteur.currentText()
-                if hasattr(self, "fieldComboBox_collecteur")
-                else "id"
-            )
-
-            self.log_info(f"Champ identifiant regard : {id_field_regard}")
-
-            if layer_collecteur:
-                self.log_info(
-                    f"Champ identifiant collecteur : {id_field_collecteur}"
+            id_field_collecteur = None
+            if layer_collecteur is not None and layer_collecteur.isValid():
+                id_field_collecteur = (
+                    self.fieldComboBox_collecteur.currentText()
+                    if hasattr(self, "fieldComboBox_collecteur") and self.fieldComboBox_collecteur.currentIndex() >= 0
+                    else None
                 )
 
-            
-            calc = BranchGeometryCalculator(
-                iface=getattr(self, "iface", None)
-            )
+            from shapely import wkt as shapely_wkt
 
-            layer_troncons = calc.get_branch_positions(
-                flat_defauts,
-                layer_regard,
-                layer_collecteur,
-                id_field_regard=id_field_regard,
-                id_field_collecteur=id_field_collecteur,
-            )
+            def to_shapely(feature):
+                geom = feature.geometry()
+                if geom is None or geom.isEmpty():
+                    return None
+                try:
+                    g = shapely_wkt.loads(geom.asWkt())
+                    if g.geom_type == "MultiPoint":
+                        return list(g.geoms)[0] if g.geoms else None
+                    if g.geom_type == "MultiLineString":
+                        return max(g.geoms, key=lambda x: x.length) if g.geoms else None
+                    if g.geom_type in ("Polygon", "MultiPolygon"):
+                        return g.centroid
+                    return g
+                except Exception:
+                    return None
 
-            
-            if layer_troncons and layer_troncons.isValid():
-                QgsProject.instance().addMapLayer(layer_troncons)
-                self.log_info("Couche des branchements ajoutée au projet.")
+            def norm(v):
+                if v is None:
+                    return None
+                text = str(v).strip()
+                if not text:
+                    return None
+                return text.lstrip("0") or "0" if text.isdigit() else text.upper()
+
+            regards = {}
+            for feature in layer_regard.getFeatures():
+                try:
+                    key = norm(feature[id_field_regard])
+                except Exception:
+                    continue
+                geom = to_shapely(feature)
+                if key is not None and geom is not None and geom.geom_type == "Point":
+                    regards[key] = geom
+
+            self.log_info(f"{len(regards)} regard(s) disponibles pour les BCA.")
+
+            troncons = {}
+            if layer_collecteur is not None and layer_collecteur.isValid() and id_field_collecteur:
+                for feature in layer_collecteur.getFeatures():
+                    try:
+                        key = norm(feature[id_field_collecteur])
+                    except Exception:
+                        continue
+                    geom = to_shapely(feature)
+                    if key is not None and geom is not None:
+                        if geom.geom_type == "LineString":
+                            troncons[key] = geom
+                        elif geom.geom_type == "MultiLineString" and len(geom.geoms):
+                            troncons[key] = max(geom.geoms, key=lambda x: x.length)
+                self.log_info(f"{len(troncons)} collecteur(s) disponibles pour les BCA.")
             else:
-                self.log_info("Impossible de générer la couche des branchements.")
+                self.log_info("Couche collecteur non sélectionnée : tronçons virtuels entre regards.")
+
+            # Compte réellement les BCA, y compris ceux portés directement par Detail.
+            nb_bca = 0
+            for detail in self.details:
+                if str(getattr(detail, "fam_obs", "")).strip().upper() == "BCA":
+                    nb_bca += 1
+                for d in getattr(detail, "defauts", None) or []:
+                    if str(getattr(d, "fam_obs", "")).strip().upper() == "BCA":
+                        nb_bca += 1
+            self.log_info(f"{nb_bca} branchement(s) BCA trouvé(s) dans les données ITV.")
+
+            if nb_bca == 0:
+                self.log_info("Aucun BCA à afficher.")
+                return
+
+            calc = BcaGeometryCalculator()
+            layer_bca = calc.create_arrow_layer(
+                self.details,
+                troncons,
+                regards,
+            )
+
+            if layer_bca is None or not layer_bca.isValid():
+                self.log_info("Impossible de créer la couche Orientation_branchement.")
+                return
+
+            # ``create_arrow_layer`` ajoute déjà la couche au projet.
+            self.log_info(
+                f"Couche Orientation_branchement ajoutée à la carte : {layer_bca.featureCount()} ligne(s)."
+            )
+            layer_bca.triggerRepaint()
 
         except Exception as e:
-            self.log_info(f"Erreur lors du calcul/affichage des branchements : {e}")
+            self.log_info(f"Erreur lors du calcul/affichage des BCA : {e}")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Erreur BCA",
+                f"Impossible de créer les lignes BCA :\n{e}"
+            )
 
 
     def calculate_and_show_inspection_geometry(self):
@@ -1150,6 +1173,459 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 f"Erreur lors du calcul de la géométrie d'inspection : {e}"
             )
 
+
+    def calculate_bca(self):
+        """Crée réellement les flèches d'orientation des BCA dans QGIS.
+
+        Implémentation 100% Python, sans dépendance à PostgreSQL/PostGIS :
+        toute la géométrie est calculée à partir de ``self.details`` et des
+        couches QGIS (regard / collecteur) déjà chargées.
+
+        - Le BCA peut être dans ``detail.defauts`` ou directement dans
+          ``self.details``.
+        - L'orientation horaire (ex. "09h") n'est pas toujours recopiée sur
+          ``Detail.orientatio`` : dans ce cas on va la chercher dans les
+          lignes ``TableC`` (``detail.c_rows``) où ``A == "BCA"``, champ
+          ``G`` (position horaire), en faisant correspondre le métrage
+          (champ ``I``).
+        - Si aucun collecteur n'est sélectionné, le tronçon utilisé pour le
+          métrage est construit entre les deux regards du BCA.
+        - Cas particulier "12h" (ou orientation toujours inconnue) : deux
+          flèches sont créées (une à droite, une à gauche), car il est
+          impossible de déterminer le côté du branchement dans ce cas.
+        """
+        from math import atan2, cos, sin, pi
+        from shapely.geometry import Point, LineString
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import (
+            QgsFeature,
+            QgsGeometry,
+            QgsField,
+            QgsLineSymbol,
+            QgsSingleSymbolRenderer,
+            QgsArrowSymbolLayer,
+            QgsVectorLayer,
+            QgsProject,
+        )
+
+        def norm(value):
+            if value is None:
+                return None
+            text = str(value).strip()
+            if not text:
+                return None
+            if text.isdigit():
+                return text.lstrip("0") or "0"
+            return text.upper()
+
+        def qgis_to_shapely(feature):
+            geom = feature.geometry()
+            if geom is None or geom.isEmpty():
+                return None
+            try:
+                from shapely import wkt as shapely_wkt
+                g = shapely_wkt.loads(geom.asWkt())
+                if g.geom_type == "MultiPoint":
+                    return list(g.geoms)[0] if g.geoms else None
+                if g.geom_type == "MultiLineString":
+                    return max(g.geoms, key=lambda x: x.length) if g.geoms else None
+                return g
+            except Exception:
+                return None
+
+        def parse_metrage(value):
+            if value is None:
+                return None
+            try:
+                if isinstance(value, str):
+                    value = value.strip().replace(',', '.')
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def orientation_from_c_rows(detail, metrage):
+            """
+            L'orientation horaire (ex. "09h") vit dans la ligne TableC dont
+            A == "BCA", champ G (position horaire), que l'on retrouve en
+            faisant correspondre le métrage (champ I).
+            """
+            if metrage is None:
+                return None
+
+            best = None
+            best_delta = None
+
+            for row in (getattr(detail, "c_rows", None) or []):
+                if getattr(row, "A", None) != "BCA":
+                    continue
+
+                g = getattr(row, "G", None)
+                i = getattr(row, "I", None)
+                if not g or i is None:
+                    continue
+
+                row_metrage = parse_metrage(i)
+                if row_metrage is None:
+                    continue
+
+                delta = abs(row_metrage - metrage)
+                if delta > 0.5:
+                    continue
+
+                if best_delta is None or delta < best_delta:
+                    best = g
+                    best_delta = delta
+
+            if best is None:
+                return None
+
+            try:
+                hour = int(str(best).strip())
+            except (TypeError, ValueError):
+                return None
+
+            if hour == 0:
+                hour = 12
+
+            return f"{hour:02d}h"
+
+        def arrow_angles(pipe_angle, orientation):
+            """
+            Retourne la liste des angles (un ou deux) auxquels tracer une
+            flèche pour une orientation donnée.
+
+            - 12h (ou inconnue) : impossible de déterminer le côté du
+              branchement -> on trace deux flèches symétriques
+              (droite + gauche).
+            - 03h/04h/05h : une flèche à droite.
+            - 06h..11h : une flèche à gauche.
+            - Sinon (code inconnu) : None.
+            """
+            o = str(orientation or "").strip().lower().replace(" ", "")
+
+            aliases = {
+                "3h": "03h", "4h": "04h", "5h": "05h",
+                "6h": "06h", "7h": "07h", "8h": "08h",
+                "9h": "09h", "10h": "10h", "11h": "11h",
+                "12h": "12h", "0h": "12h",
+            }
+            o = aliases.get(o, o)
+
+            right = ("03h", "04h", "05h")
+            left = ("06h", "07h", "08h", "09h", "10h", "11h")
+
+            if o == "12h" or not o:
+                return [pipe_angle - pi / 2.0, pipe_angle + pi / 2.0]
+            if o in right:
+                return [pipe_angle - pi / 2.0]
+            if o in left:
+                return [pipe_angle + pi / 2.0]
+            return None
+
+        try:
+            if not getattr(self, "details", None):
+                self.log_info("Aucun détail ITV disponible pour les BCA.")
+                return None
+
+            layer_regard = (
+                self.mapLayerComboBox_regard.currentLayer()
+                if hasattr(self, "mapLayerComboBox_regard") else None
+            )
+            layer_collecteur = (
+                self.mapLayerComboBox_collecteur.currentLayer()
+                if hasattr(self, "mapLayerComboBox_collecteur") else None
+            )
+
+            if layer_regard is None or not layer_regard.isValid():
+                self.log_info("Aucune couche regard valide sélectionnée.")
+                return None
+
+            id_field_regard = (
+                self.fieldComboBox_regard.currentText()
+                if hasattr(self, "fieldComboBox_regard")
+                and self.fieldComboBox_regard.currentIndex() >= 0
+                else None
+            )
+            if not id_field_regard:
+                self.log_info("Champ identifiant regard non sélectionné.")
+                return None
+
+            id_field_collecteur = None
+            if layer_collecteur is not None:
+                id_field_collecteur = (
+                    self.fieldComboBox_collecteur.currentText()
+                    if hasattr(self, "fieldComboBox_collecteur")
+                    and self.fieldComboBox_collecteur.currentIndex() >= 0
+                    else None
+                )
+                if not id_field_collecteur:
+                    self.log_info("Champ identifiant collecteur non sélectionné.")
+                    return None
+
+            # ----------------------------------------------------------
+            # 1. Chargement des regards : id -> Point
+            # ----------------------------------------------------------
+            regards = {}
+            for f in layer_regard.getFeatures():
+                try:
+                    key = norm(f[id_field_regard])
+                except Exception:
+                    continue
+                if key is None:
+                    continue
+                geom = qgis_to_shapely(f)
+                if geom is None:
+                    continue
+                if geom.geom_type == "Point":
+                    regards[key] = geom
+                elif geom.geom_type in ("Polygon", "LineString"):
+                    regards[key] = geom.centroid
+
+            self.log_info(f"{len(regards)} regard(s) disponibles pour les BCA.")
+
+            # ----------------------------------------------------------
+            # 2. Chargement des collecteurs si fournis
+            # ----------------------------------------------------------
+            troncons = {}
+            if layer_collecteur is not None:
+                for f in layer_collecteur.getFeatures():
+                    try:
+                        key = norm(f[id_field_collecteur])
+                    except Exception:
+                        continue
+                    if key is None:
+                        continue
+                    geom = qgis_to_shapely(f)
+                    if geom is None:
+                        continue
+                    if geom.geom_type == "LineString":
+                        troncons[key] = geom
+                    elif geom.geom_type == "MultiLineString" and len(geom.geoms):
+                        troncons[key] = max(geom.geoms, key=lambda x: x.length)
+                self.log_info(f"{len(troncons)} collecteur(s) disponibles pour les BCA.")
+            else:
+                self.log_info("Aucune couche collecteur : utilisation des tronçons virtuels entre regards.")
+
+            # ----------------------------------------------------------
+            # 3. Aplatir les BCA, avec l'orientation réelle (Detail,
+            #    défaut, ou à défaut ligne TableC "BCA" correspondante)
+            # ----------------------------------------------------------
+            bcas = []
+            for detail in self.details:
+                parent_orientation = getattr(detail, "orientatio", None)
+
+                if getattr(detail, "fam_obs", None) == "BCA":
+                    m = parse_metrage(getattr(detail, "metrage", None))
+                    o = parent_orientation or orientation_from_c_rows(detail, m)
+                    bcas.append((detail, detail, o))
+
+                for d in (getattr(detail, "defauts", None) or []):
+                    if getattr(d, "fam_obs", None) == "BCA":
+                        m = parse_metrage(getattr(d, "metrage", None))
+                        o = (
+                            getattr(d, "orientatio", None)
+                            or parent_orientation
+                            or orientation_from_c_rows(detail, m)
+                        )
+                        bcas.append((detail, d, o))
+
+            self.log_info(f"{len(bcas)} BCA trouvé(s) dans les données ITV.")
+            if not bcas:
+                self.log_info("Aucune flèche BCA à créer.")
+                return None
+
+            # ----------------------------------------------------------
+            # 4. Couche mémoire
+            # ----------------------------------------------------------
+            layer_name = "Orientation_branchement"
+            for old in list(QgsProject.instance().mapLayers().values()):
+                if old.name() == layer_name:
+                    QgsProject.instance().removeMapLayer(old.id())
+
+            crs = layer_regard.crs().authid() or "EPSG:2154"
+            arrow_layer = QgsVectorLayer(
+                f"LineString?crs={crs}", layer_name, "memory"
+            )
+            if not arrow_layer.isValid():
+                raise RuntimeError("Impossible de créer la couche Orientation_branchement.")
+
+            provider = arrow_layer.dataProvider()
+            provider.addAttributes([
+                QgsField("gid", QVariant.Int),
+                QgsField("inspection_gid", QVariant.Int),
+                QgsField("id_troncon", QVariant.String),
+                QgsField("id_reg_ent", QVariant.String),
+                QgsField("id_reg_sor", QVariant.String),
+                QgsField("metrage", QVariant.Double),
+                QgsField("orientatio", QVariant.String),
+            ])
+            arrow_layer.updateFields()
+
+            features = []
+            nb_created = 0
+            nb_missing_regards = 0
+            nb_missing_orientation = 0
+            nb_invalid_geometry = 0
+
+            # ----------------------------------------------------------
+            # 5. Une (ou deux, cas 12h/inconnue) flèche(s) par BCA
+            # ----------------------------------------------------------
+            for parent, bca, orientation in bcas:
+                id_troncon = getattr(bca, "id_troncon", None)
+                id_reg_ent = getattr(bca, "id_reg_ent", None)
+                id_reg_sor = getattr(bca, "id_reg_sor", None)
+                metrage = parse_metrage(getattr(bca, "metrage", None))
+
+                if id_reg_ent is None:
+                    id_reg_ent = getattr(parent, "id_reg_ent", None)
+                if id_reg_sor is None:
+                    id_reg_sor = getattr(parent, "id_reg_sor", None)
+                if id_troncon is None:
+                    id_troncon = getattr(parent, "id_troncon", None)
+                if metrage is None:
+                    metrage = parse_metrage(getattr(parent, "metrage", None))
+
+                if not id_reg_ent or not id_reg_sor:
+                    nb_missing_regards += 1
+                    continue
+                if norm(id_reg_ent) not in regards or norm(id_reg_sor) not in regards:
+                    nb_missing_regards += 1
+                    continue
+
+                if orientation is None or not str(orientation).strip():
+                    nb_missing_orientation += 1
+
+                p_ent = regards[norm(id_reg_ent)]
+                p_sor = regards[norm(id_reg_sor)]
+
+                line = troncons.get(norm(id_troncon)) if layer_collecteur is not None else None
+
+                if line is None:
+                    line = LineString([
+                        (p_ent.x, p_ent.y),
+                        (p_sor.x, p_sor.y),
+                    ])
+
+                if line.is_empty or line.length <= 0:
+                    nb_invalid_geometry += 1
+                    continue
+
+                if metrage is None:
+                    metrage = line.length / 2.0
+                metrage = max(0.0, min(metrage, line.length))
+
+                a = Point(line.coords[0])
+                b = Point(line.coords[-1])
+                d_forward = a.distance(p_ent) + b.distance(p_sor)
+                d_reverse = a.distance(p_sor) + b.distance(p_ent)
+                forward = d_forward <= d_reverse
+
+                if not forward:
+                    coords = list(line.coords)
+                    coords.reverse()
+                    line = LineString(coords)
+
+                obs = line.interpolate(metrage)
+
+                c0 = line.interpolate(max(0.0, metrage - 0.01))
+                c1 = line.interpolate(min(line.length, metrage + 0.01))
+                if c0.distance(c1) <= 0:
+                    c0 = Point(line.coords[0])
+                    c1 = Point(line.coords[-1])
+                pipe_angle = atan2(c1.y - c0.y, c1.x - c0.x)
+
+                angles = arrow_angles(pipe_angle, orientation)
+                if not angles:
+                    nb_missing_orientation += 1
+                    continue
+
+                for angle in angles:
+                    end = Point(
+                        obs.x + 3.0 * cos(angle),
+                        obs.y + 3.0 * sin(angle),
+                    )
+                    geom = LineString([(obs.x, obs.y), (end.x, end.y)])
+                    if geom.is_empty or geom.length <= 0:
+                        nb_invalid_geometry += 1
+                        continue
+
+                    f = QgsFeature(arrow_layer.fields())
+                    f.setGeometry(QgsGeometry.fromWkt(geom.wkt))
+                    f.setAttributes([
+                        getattr(bca, "gid", None) or getattr(parent, "gid", None),
+                        getattr(bca, "inspection_gid", None) or getattr(parent, "inspection_gid", None),
+                        None if id_troncon is None else str(id_troncon),
+                        None if id_reg_ent is None else str(id_reg_ent),
+                        None if id_reg_sor is None else str(id_reg_sor),
+                        metrage,
+                        str(orientation) if orientation else "12h",
+                    ])
+                    features.append(f)
+                    nb_created += 1
+
+            if features:
+                provider.addFeatures(features)
+            arrow_layer.updateExtents()
+
+            # ----------------------------------------------------------
+            # 6. Symbologie : vraie tête de flèche visible
+            # ----------------------------------------------------------
+            symbol = QgsLineSymbol.createSimple({
+                "color": "0,0,255,255",
+                "width": "1.2",
+            })
+            arrow_symbol = QgsArrowSymbolLayer.create({
+                "is_curved": "0",
+                "arrow_width": "2.8",
+                "arrow_start_width": "0",
+                "head_length": "4",
+                "head_thickness": "3",
+                "head_type": "0",
+                "color": "0,0,255,255",
+                "outline_color": "0,0,255,255",
+            })
+            symbol.appendSymbolLayer(arrow_symbol)
+            arrow_layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+
+            QgsProject.instance().addMapLayer(arrow_layer)
+            arrow_layer.triggerRepaint()
+
+            # ----------------------------------------------------------
+            # 7. Log
+            # ----------------------------------------------------------
+            self.log_info(
+                f"BCA : {len(bcas)} trouvé(s), {nb_created} flèche(s) créée(s)."
+            )
+            if nb_missing_regards:
+                self.log_info(f"BCA ignorés : {nb_missing_regards} avec regard(s) introuvable(s).")
+            if nb_missing_orientation:
+                self.log_info(
+                    f"{nb_missing_orientation} BCA sans orientation trouvée "
+                    "(ni sur le Detail, ni dans les lignes TableC "
+                    "correspondantes) : deux flèches tracées, "
+                    "droite + gauche, faute de savoir quel côté choisir."
+                )
+            if nb_invalid_geometry:
+                self.log_info(f"BCA ignorés : {nb_invalid_geometry} avec géométrie invalide.")
+
+            iface = getattr(self, "iface", None)
+            if iface is not None and nb_created:
+                try:
+                    iface.mapCanvas().refresh()
+                except Exception:
+                    pass
+
+            return arrow_layer
+
+        except Exception as e:
+            self.log_info(f"Erreur lors de la création des flèches BCA : {e}")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Erreur BCA",
+                f"Impossible de créer les flèches BCA :\n{e}",
+            )
+            return None
+
     def execute(self):
         """
         Lance le traitement principal :
@@ -1246,6 +1722,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             self.calculate_and_show_defect_positions()
             self.set_progress(95)
             self.calculate_and_show_branch_positions()
+            self.calculate_bca()
+            self.set_progress(97)
             self.load_ids_tables(connection_params, inspection_gid)
             self.set_progress(100)
 
