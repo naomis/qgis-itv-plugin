@@ -51,6 +51,12 @@ class TableC:
     detail: "Detail | None" = None
     passage_gid: int | None = None
 
+@dataclass
+class IDS:
+    gid: int | None = None
+    inspection_gid: int | None = None
+    id_itv: str | None = None
+    id_sig: str | None = None
 
 @dataclass
 class Detail:
