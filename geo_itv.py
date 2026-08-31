@@ -34,6 +34,29 @@ from .geo_itv_dialog import GeoITVDialog
 import os.path
 
 
+SETTINGS_KEY_USE_DB_VIEWS = "GeoITV/use_db_views"
+SETTINGS_KEY_DB_SCHEMA = "GeoITV/db_schema"
+SETTINGS_KEY_LOG_LEVEL = "GeoITV/log_level"
+
+
+def _read_bool_setting(key, default=False):
+    """
+    Lit un booléen dans QSettings de manière robuste.
+    """
+    value = QSettings().value(key, default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text in ("1", "true", "yes", "y", "on")
+
+
+def _read_text_setting(key, default=""):
+    value = QSettings().value(key, default)
+    if value is None:
+        return default
+    return str(value)
+
+
 class GeoITV:
     """QGIS Plugin Implementation."""
 
@@ -199,7 +222,7 @@ class GeoITV:
             "<div style='text-align:center;'><b>Merci à tous les contributeurs et utilisateurs de ce plugin !</b></div><br>"
             "<b>Code source :</b> <a href='https://github.com/naomis44/geo-itv'>https://github.com/naomis44/geo-itv</a><br>"
             "<b>Licence :</b> MIT License<br><br>"
-            "<span style='font-size:10pt;'>Projet développé dans le cadre du programme <b>GEOPAL</b> (<a href='https://www.geopal.org/'>en savoir plus</a>) financé par la Région des Pays de la Loire.</span>"
+            "<span style='font-size:9pt;'>Projet développé dans le cadre du programme <b>GEOPAL</b> (<a href='https://www.geopal.org/'>en savoir plus</a>) financé par la Région des Pays de la Loire.</span>"
         )
         label_text_after = QLabel(text_after_logo)
         label_text_after.setOpenExternalLinks(True)
@@ -238,8 +261,12 @@ class GeoITV:
         layout.addLayout(btns_layout)
 
         dlg.setLayout(layout)
-        # Appliquer un fond blanc à la fenêtre
-        dlg.setStyleSheet("background-color: white;")
+        # Appliquer un style local compact pour la boîte "À propos"
+        dlg.setStyleSheet(
+            "QDialog { background-color: white; }"
+            "QLabel { font-size: 9pt; }"
+            "QDialogButtonBox QPushButton { font-size: 9pt; min-height: 24px; }"
+        )
         dlg.exec_()
 
     def show_help(self):
@@ -253,8 +280,130 @@ class GeoITV:
             # Fallback : doc en ligne si la locale n'existe pas
             QDesktopServices.openUrl(QUrl("https://votre-url-aide-ou-doc.fr"))
 
+    def show_configuration(self):
+        """
+        Affiche la configuration du mode d'exécution du plugin.
+        """
+        from qgis.PyQt.QtWidgets import (
+            QDialog,
+            QVBoxLayout,
+            QHBoxLayout,
+            QLabel,
+            QCheckBox,
+            QLineEdit,
+            QComboBox,
+            QWidget,
+            QDialogButtonBox,
+        )
+
+        dlg = QDialog(self.iface.mainWindow())
+        dlg.setWindowTitle("Configuration GeoITV")
+        try:
+            font = dlg.font()
+            font.setPointSize(9)
+            dlg.setFont(font)
+        except Exception:
+            pass
+        dlg.setStyleSheet(
+            "QLabel { font-size: 9pt; }"
+            "QCheckBox { font-size: 9pt; }"
+            "QLineEdit { font-size: 9pt; min-height: 22px; }"
+            "QComboBox { font-size: 9pt; min-height: 22px; }"
+            "QDialogButtonBox QPushButton { font-size: 9pt; min-height: 24px; }"
+        )
+
+        layout = QVBoxLayout()
+
+        intro = QLabel(
+            "Choisissez le mode d'exécution par défaut du plugin :"
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        checkbox_db = QCheckBox("Activer le mode base de données (vues SQL legacy)")
+        checkbox_db.setChecked(_read_bool_setting(SETTINGS_KEY_USE_DB_VIEWS, default=False))
+        layout.addWidget(checkbox_db)
+
+        schema_row = QWidget()
+        schema_row_layout = QHBoxLayout()
+        schema_row_layout.setContentsMargins(0, 0, 0, 0)
+        schema_row_layout.addWidget(QLabel("Schéma SQL :"))
+        schema_input = QLineEdit()
+        schema_input.setText(_read_text_setting(SETTINGS_KEY_DB_SCHEMA, "itv"))
+        schema_input.setPlaceholderText("itv")
+        schema_row_layout.addWidget(schema_input)
+        schema_row.setLayout(schema_row_layout)
+        layout.addWidget(schema_row)
+
+        log_row = QWidget()
+        log_row_layout = QHBoxLayout()
+        log_row_layout.setContentsMargins(0, 0, 0, 0)
+        log_row_layout.addWidget(QLabel("Niveau de log :"))
+        log_level_combo = QComboBox()
+        log_level_combo.addItem("Standard", "info")
+        log_level_combo.addItem("Debug", "debug")
+        current_log_level = _read_text_setting(SETTINGS_KEY_LOG_LEVEL, "info").strip().lower()
+        if current_log_level == "verbose":
+            current_log_level = "debug"
+        idx = log_level_combo.findData(current_log_level)
+        log_level_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        log_row_layout.addWidget(log_level_combo)
+        log_row.setLayout(log_row_layout)
+        layout.addWidget(log_row)
+
+        help_text = QLabel(
+            "<i>Décoché: mode FullPython (sans dépendance SQL).<br>"
+            "Coché: mode DB (PostgreSQL/PostGIS + vues SQL).</i>"
+        )
+        help_text.setWordWrap(True)
+        layout.addWidget(help_text)
+
+        def refresh_visibility():
+            schema_row.setVisible(checkbox_db.isChecked())
+
+        checkbox_db.toggled.connect(lambda _: refresh_visibility())
+        refresh_visibility()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch(1)
+        btn_layout.addWidget(buttons)
+        layout.addLayout(btn_layout)
+
+        dlg.setLayout(layout)
+
+        if dlg.exec_():
+            use_db_views = checkbox_db.isChecked()
+            schema_name = schema_input.text().strip() or "itv"
+
+            settings = QSettings()
+            settings.setValue(SETTINGS_KEY_USE_DB_VIEWS, use_db_views)
+            settings.setValue(SETTINGS_KEY_DB_SCHEMA, schema_name)
+            settings.setValue(SETTINGS_KEY_LOG_LEVEL, log_level_combo.currentData())
+
+            mode_label = "DB legacy (vues SQL)" if use_db_views else "FullPython"
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "Configuration enregistrée",
+                f"Mode : {mode_label}" + (f"\nSchéma SQL : {schema_name}" if use_db_views else "")
+            )
+
+            if hasattr(self, "dlg") and self.dlg is not None:
+                try:
+                    self.dlg.refresh_mode_ui()
+                except Exception:
+                    pass
+
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
+
+        # Action Configuration
+        self.action_config = QAction("Configuration", self.iface.mainWindow())
+        self.action_config.triggered.connect(self.show_configuration)
+        self.iface.addPluginToMenu(self.menu, self.action_config)
 
         # Action À propos
         self.action_about = QAction("À propos", self.iface.mainWindow())
@@ -283,6 +432,8 @@ class GeoITV:
             self.iface.removePluginMenu(self.tr(u'&GeoITV'), action)
             self.iface.removeToolBarIcon(action)
         # Remove custom menu actions if they exist
+        if hasattr(self, 'action_config'):
+            self.iface.removePluginMenu(self.menu, self.action_config)
         if hasattr(self, 'action_about'):
             self.iface.removePluginMenu(self.menu, self.action_about)
         if hasattr(self, 'action_help'):
@@ -301,7 +452,7 @@ class GeoITV:
 
         # Reset progress bar at each run
         self.dlg.progressBar.setValue(0)
-        self.dlg.log_info("Démarrage de GeoITV...")
+        self.dlg.log_info("Démarrage de GeoITV...", True)
 
         # Get the list of PostgreSQL connections and populate the combo box
         connexions = QgsProviderRegistry.instance().providerMetadata("postgres").connections()
@@ -312,6 +463,7 @@ class GeoITV:
         self.dlg.mapLayerComboBox_regard.setFilters(QgsMapLayerProxyModel.PointLayer)
         self.dlg.mapLayerComboBox_collecteur.setFilters(QgsMapLayerProxyModel.LineLayer)
         self.dlg.mapLayerComboBox_collecteur.setCurrentIndex(0)
+        self.dlg.refresh_mode_ui()
         
         # show the dialog
         self.dlg.show()

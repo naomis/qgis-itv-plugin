@@ -22,6 +22,45 @@ class BranchGeometryCalculator:
     def __init__(self, iface=None):
         self.iface = iface
 
+    def _normalize_key(self, value):
+        """
+        Normalise une clé d'identifiant pour fiabiliser les jointures
+        (casse, espaces, zéros initiaux sur valeurs numériques).
+        """
+        if value is None:
+            return None
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        if text.isdigit():
+            return text.lstrip("0") or "0"
+
+        return text.upper()
+
+    def _is_bca(self, obj):
+        """
+        Retourne True si l'objet représente un BCA.
+        """
+        fam_obs = getattr(obj, "fam_obs", None)
+        if fam_obs is None:
+            return False
+        return str(fam_obs).strip().upper() == "BCA"
+
+    def _iter_bca_entries(self, details):
+        """
+        Retourne les BCA sous forme de couples (parent_detail, bca_obj),
+        en couvrant à la fois les BCA portés par Detail et par defauts.
+        """
+        for detail in details or []:
+            if self._is_bca(detail):
+                yield detail, detail
+
+            for defect in (getattr(detail, "defauts", None) or []):
+                if self._is_bca(defect):
+                    yield detail, defect
+
 
 
     def get_branch_positions(
@@ -88,18 +127,19 @@ class BranchGeometryCalculator:
         provider = result.dataProvider()
 
         provider.addAttributes([
+            QgsField("id", QVariant.Int),
             QgsField("inspection_gid", QVariant.Int),
-            QgsField("id_reg_ent", QVariant.String),
-            QgsField("id_reg_sor", QVariant.String),
+            QgsField("id_bcht", QVariant.String),
             QgsField("x", QVariant.Double),
             QgsField("y", QVariant.Double),
-            QgsField("sens_ecoul", QVariant.String),
-            QgsField("type_obs", QVariant.String),
-            QgsField("fam_obs", QVariant.String),
             QgsField("code", QVariant.String),
             QgsField("libelle", QVariant.String),
             QgsField("orientatio", QVariant.String),
-            QgsField("metrage", QVariant.Double),
+            QgsField("sens_inspe", QVariant.String),
+            QgsField("type_mat", QVariant.String),
+            QgsField("diametre", QVariant.String),
+            QgsField("id_reg_ent", QVariant.String),
+            QgsField("id_reg_sor", QVariant.String),
         ])
 
         result.updateFields()
@@ -108,16 +148,24 @@ class BranchGeometryCalculator:
 
         
 
-        for detail in details:
+        row_id = 1
+        for parent_detail, bca in self._iter_bca_entries(details):
 
-            # La fonction SQL ne garde que les BCA
-            if getattr(detail, "fam_obs", None) != "BCA":
-                continue
+            id_reg_ent = getattr(bca, "id_reg_ent", None)
+            if id_reg_ent is None:
+                id_reg_ent = getattr(parent_detail, "id_reg_ent", None)
 
-            id_reg_ent = getattr(detail, "id_reg_ent", None)
-            id_reg_sor = getattr(detail, "id_reg_sor", None)
-            id_troncon = getattr(detail, "id_troncon", None)
-            metrage = getattr(detail, "metrage", None)
+            id_reg_sor = getattr(bca, "id_reg_sor", None)
+            if id_reg_sor is None:
+                id_reg_sor = getattr(parent_detail, "id_reg_sor", None)
+
+            id_troncon = getattr(bca, "id_troncon", None)
+            if id_troncon is None:
+                id_troncon = getattr(parent_detail, "id_troncon", None)
+
+            metrage = getattr(bca, "metrage", None)
+            if metrage is None:
+                metrage = getattr(parent_detail, "metrage", None)
 
             if metrage is None:
                 continue
@@ -144,32 +192,25 @@ class BranchGeometryCalculator:
                 continue
 
             
-            if collecteurs:
+            point = None
 
+            if collecteurs and id_troncon is not None:
                 collecteur = self._find_feature(
                     collecteurs,
                     id_troncon
                 )
 
-                if not collecteur:
-                    continue
+                if collecteur:
+                    troncon_geom = collecteur.geometry()
+                    if troncon_geom and not troncon_geom.isEmpty():
+                        point = self._calculate_on_troncon(
+                            troncon_geom,
+                            geom_ent,
+                            geom_sor,
+                            float(metrage)
+                        )
 
-                troncon_geom = collecteur.geometry()
-
-                if troncon_geom.isEmpty():
-                    continue
-
-                point = self._calculate_on_troncon(
-                    troncon_geom,
-                    geom_ent,
-                    geom_sor,
-                    float(metrage)
-                )
-
-            
-
-            else:
-
+            if point is None:
                 point = self._calculate_between_regards(
                     geom_ent,
                     geom_sor,
@@ -186,21 +227,23 @@ class BranchGeometryCalculator:
             )
 
             feature.setAttributes([
-                getattr(detail, "inspection_gid", None),
-                str(id_reg_ent) if id_reg_ent is not None else None,
-                str(id_reg_sor) if id_reg_sor is not None else None,
+                row_id,
+                getattr(bca, "inspection_gid", None) or getattr(parent_detail, "inspection_gid", None),
+                None,
                 point.x(),
                 point.y(),
-                getattr(detail, "sens_ecoul", None),
-                getattr(detail, "type_obs", None),
-                getattr(detail, "fam_obs", None),
-                getattr(detail, "code_obs", None),
-                getattr(detail, "libel_obs", None),
-                getattr(detail, "orientatio", None),
-                float(metrage),
+                getattr(bca, "code_obs", None) or getattr(parent_detail, "code_obs", None),
+                getattr(bca, "libel_obs", None) or getattr(parent_detail, "libel_obs", None),
+                getattr(bca, "orientatio", None) or getattr(parent_detail, "orientatio", None),
+                getattr(bca, "sens_ecoul", None) or getattr(parent_detail, "sens_ecoul", None),
+                None,
+                None,
+                str(id_reg_ent) if id_reg_ent is not None else None,
+                str(id_reg_sor) if id_reg_sor is not None else None,
             ])
 
             features_result.append(feature)
+            row_id += 1
 
         provider.addFeatures(features_result)
         result.updateExtents()
@@ -238,8 +281,9 @@ class BranchGeometryCalculator:
 
             value = feature.attribute(field_index)
 
-            if value is not None:
-                index[str(value)] = feature
+            normalized = self._normalize_key(value)
+            if normalized is not None:
+                index[normalized] = feature
 
         return index
 
@@ -259,7 +303,7 @@ class BranchGeometryCalculator:
         if value is None:
             return None
 
-        return index.get(str(value))
+        return index.get(self._normalize_key(value))
 
 
     def _calculate_on_troncon(

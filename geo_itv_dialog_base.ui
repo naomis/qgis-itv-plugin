@@ -65,7 +65,7 @@
                  </font>
                 </property>
                 <property name="text">
-                 <string>1 - Connexion à la base de donnée ITV</string>
+                   <string>Connexion à la base de données ITV</string>
                 </property>
                </widget>
               </item>
@@ -78,7 +78,7 @@
                  </font>
                 </property>
                 <property name="text">
-                 <string>Sélectionner la base de donnée possèdant le schéma &quot;itv&quot;</string>
+                 <string>Sélectionner la base de données possédant le schéma &quot;itv&quot;</string>
                 </property>
                </widget>
               </item>
@@ -157,7 +157,7 @@
                  </font>
                 </property>
                 <property name="text">
-                 <string>2- Informations générales</string>
+                 <string>Informations générales</string>
                 </property>
                </widget>
               </item>
@@ -250,7 +250,7 @@
                  </font>
                 </property>
                 <property name="text">
-                 <string>3 - Ajoutez le fichier TXT contenant les données ITV *</string>
+                 <string>Ajoutez le fichier TXT contenant les données ITV *</string>
                 </property>
                </widget>
               </item>
@@ -320,7 +320,7 @@
                  </font>
                 </property>
                 <property name="text">
-                 <string>4 - Sélectionnez la couche &quot;Regard&quot; de votre réseau d'assainissement</string>
+                 <string>Sélectionnez la couche &quot;Regard&quot; de votre réseau d'assainissement</string>
                 </property>
                </widget>
               </item>
@@ -389,7 +389,7 @@
                  </font>
                 </property>
                 <property name="text">
-                 <string>Optionnellement, joindre un fichier CSV de correpondance pour les regards  (id_itv | id_sig)</string>
+                 <string>Optionnellement, joindre un fichier CSV de correspondance pour les regards (id_itv | id_sig)</string>
                 </property>
                </widget>
               </item>
@@ -439,7 +439,7 @@
                  </font>
                 </property>
                 <property name="text">
-                 <string>5 - (OPTIONNEL) Sélectionnez la couche &quot;Collecteur&quot; de votre 
+                 <string>(OPTIONNEL) Sélectionnez la couche &quot;Collecteur&quot; de votre 
       réseau d'assainissement</string>
                 </property>
                </widget>
@@ -512,7 +512,7 @@
                  </font>
                 </property>
                 <property name="text">
-                 <string>Optionnellement, joindre un fichier CSV de correpondance pour les collecteurs (id_itv | id_sig)</string>
+                 <string>Optionnellement, joindre un fichier CSV de correspondance pour les collecteurs (id_itv | id_sig)</string>
                 </property>
                </widget>
               </item>
@@ -541,13 +541,41 @@
             <item>
              <widget class="QCheckBox" name="cbClearHistory">
               <property name="text">
-               <string>Supprimer l'historique ! (recommandé)</string>
+                    <string>Réinitialiser l'historique DB avant import</string>
               </property>
               <property name="checked">
                <bool>true</bool>
               </property>
              </widget>
             </item>
+                <item>
+                 <widget class="QLabel" name="label_clear_history_help">
+                  <property name="font">
+                    <font>
+                     <italic>true</italic>
+                    </font>
+                  </property>
+                  <property name="text">
+                    <string>Mode DB uniquement: vide les inspections existantes et supprime les tables temporaires avant import.</string>
+                  </property>
+                  <property name="wordWrap">
+                    <bool>true</bool>
+                  </property>
+                 </widget>
+                </item>
+              <item>
+               <spacer name="verticalSpacer_bottom_left">
+                <property name="orientation">
+                 <enum>Qt::Vertical</enum>
+                </property>
+                <property name="sizeHint" stdset="0">
+                 <size>
+                <width>20</width>
+                <height>40</height>
+                 </size>
+                </property>
+               </spacer>
+              </item>
             <item>
              <widget class="QPushButton" name="btExecute">
               <property name="enabled">
@@ -566,7 +594,7 @@
                </size>
               </property>
               <property name="text">
-               <string>Executer</string>
+               <string>Exécuter</string>
               </property>
               <property name="flat">
                <bool>false</bool>

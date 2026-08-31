@@ -6,8 +6,13 @@ from ..geo_itv_data import TableB, TableC, Detail, DefautDetecte
 B01_FIELD_TRONCON = "AAA"
 B01_FIELD_REG_AMONT = "AAB"
 B01_FIELD_REG_AVAL = "AAF"
+B01_FIELD_SENS_ECOUL = "AAK"
 C_FIELD_METRAGE = "I"
 C_FIELD_CODE_OBS = "A"
+C_FIELD_CODE_OBS_B = "B"
+C_FIELD_CODE_OBS_C = "C"
+C_FIELD_ORIENTATION_G = "G"
+C_FIELD_ORIENTATION_H = "H"
 
 
 class FileParser:
@@ -18,6 +23,65 @@ class FileParser:
 
     def __init__(self):
         pass
+
+    def _clean_text(self, raw_value: Optional[str]) -> Optional[str]:
+        """
+        Nettoie une valeur texte (trim + retrait des guillemets),
+        retourne None si vide.
+        """
+        if raw_value is None:
+            return None
+        value = str(raw_value).strip().strip('"')
+        return value if value else None
+
+    def _build_code_obs(self, c_row: TableC) -> Optional[str]:
+        """
+        Reproduit la logique SQL de v_itv_details :
+        code_obs = A[-B][-C]
+        """
+        a = self._clean_text(getattr(c_row, C_FIELD_CODE_OBS, None))
+        b = self._clean_text(getattr(c_row, C_FIELD_CODE_OBS_B, None))
+        c = self._clean_text(getattr(c_row, C_FIELD_CODE_OBS_C, None))
+
+        if not a:
+            return None
+
+        parts = [a]
+        if b:
+            parts.append(b)
+        if c:
+            parts.append(c)
+        return "-".join(parts)
+
+    def _build_orientation(self, c_row: TableC) -> Optional[str]:
+        """
+        Reproduit la logique SQL de v_itv_details :
+        orientatio = Gh, Hh ou Gh-Hh.
+        """
+        g = self._clean_text(getattr(c_row, C_FIELD_ORIENTATION_G, None))
+        h = self._clean_text(getattr(c_row, C_FIELD_ORIENTATION_H, None))
+
+        def fmt_hour(value: Optional[str]) -> Optional[str]:
+            if not value:
+                return None
+            text = str(value).strip()
+            if not text:
+                return None
+            try:
+                return f"{int(text):02d}h"
+            except (TypeError, ValueError):
+                return None
+
+        g_fmt = fmt_hour(g)
+        h_fmt = fmt_hour(h)
+
+        if g_fmt and h_fmt:
+            return f"{g_fmt}-{h_fmt}"
+        if g_fmt:
+            return g_fmt
+        if h_fmt:
+            return h_fmt
+        return None
 
     def parse(self, file_path: str) -> Dict[str, Any]:
         """
@@ -95,6 +159,9 @@ class FileParser:
                         current_detail.id_troncon = self._clean_id(
                             getattr(b_row, B01_FIELD_TRONCON, None)
                         )
+                        current_detail.sens_ecoul = self._clean_text(
+                            getattr(b_row, B01_FIELD_SENS_ECOUL, None)
+                        )
 
                 elif current_table_name == "#C":
                     c_row = TableC()
@@ -105,14 +172,9 @@ class FileParser:
 
                     code_obs = getattr(c_row, C_FIELD_CODE_OBS, None)
                     if code_obs:
-                        code_obs = code_obs.strip().strip('"')
-
-                        # DEBUG temporaire : écrit chaque code_obs lu dans un fichier
-                        try:
-                            with open(r"C:\temp\geo_itv_debug.txt", "a", encoding="utf-8") as dbg:
-                                dbg.write(f"code_obs={code_obs!r} colonnes={current_columns!r} valeurs={values!r}\n")
-                        except Exception as e:
-                            pass
+                        fam_obs = self._clean_text(code_obs)
+                        code_obs = self._build_code_obs(c_row)
+                        orientatio = self._build_orientation(c_row)
 
                         metrage = self._parse_metrage(
                             getattr(c_row, C_FIELD_METRAGE, None),
@@ -121,14 +183,17 @@ class FileParser:
 
                         current_detail.code_obs = code_obs
                         current_detail.metrage = metrage
-                        current_detail.fam_obs = code_obs
+                        current_detail.fam_obs = fam_obs
                         current_detail.libel_obs = None
+                        current_detail.orientatio = orientatio
 
                         defaut = DefautDetecte(
                             code_obs=code_obs,
                             metrage=metrage,
-                            fam_obs=code_obs,
+                            fam_obs=fam_obs,
                         )
+                        defaut.orientatio = orientatio
+                        defaut.sens_ecoul = current_detail.sens_ecoul
                         current_detail.add_defaut(defaut)
 
         return {

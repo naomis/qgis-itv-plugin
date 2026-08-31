@@ -29,6 +29,18 @@ class TableB:
     AAT: Optional[str] = None
     AAU: Optional[str] = None
     AAV: Optional[str] = None
+    # Champs complementaires utilises par les vues physiques
+    # (B02/B03) pour les tables ids enrichies.
+    ABF: Optional[str] = None
+    ACG: Optional[str] = None
+    ADE: Optional[str] = None
+    ABQ: Optional[str] = None
+    ACA: Optional[str] = None
+    ACB: Optional[str] = None
+    ACC: Optional[str] = None
+    ACD: Optional[str] = None
+    ACH: Optional[str] = None
+    ACI: Optional[str] = None
 
     # Référence vers le Detail parent (optionnel)
     detail: Optional["Detail"] = None
