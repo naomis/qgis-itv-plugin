@@ -1,0 +1,46 @@
+# This file contains metadata for your plugin.
+
+# This file should be included when you package your plugin.# Mandatory items:
+
+[general]
+name=GeoITV
+qgisMinimumVersion=3.0
+description=Ce plugin QGIS géolocalise automatiquement branchements et défauts observés lors d’iune nspection télévisée (ITV) à partir du fichier TXT normé (NF EN 13508-2+A1)
+version=1.0.0
+author=NAOMIS
+email=nantes@naomis.fr
+
+about=Ce plugin QGIS permet de géolocaliser automatiquement les branchements et défauts observés lors d’une inspection télévisée (ITV) des réseaux d’assainissement, à partir de fichiers TXT conformes à la norme NF EN 13508-2+A1. Il convertit ces données non spatiales en couches SIG exploitables : emprise de l’inspection, points de branchements (avec orientation) et défauts observés. Le plugin gère la correspondance des identifiants entre ITV et SIG, traduit les codes ITV, détecte les incohérences de données, et fournit des styles QGIS prêts à l’emploi pour une cartographie immédiate. Compatible avec toutes les projections, il facilite l’intégration des inspections ITV dans le SIG communal.
+
+tracker=https://github.com/naomis/qgis-itv-plugin/issues
+repository=https://github.com/naomis/qgis-itv-plugin
+# End of mandatory metadata
+
+# Recommended items:
+
+hasProcessingProvider=no
+changelog=1.0.0 - Première version stable publiée.
+
+# Tags are comma separated with spaces allowed
+tags=analysis, calculator, shapefile, postgis, layers, import, export, point, csv, txt, vector, itv, locate, geolocation
+
+homepage=https://www.naomis.fr/
+category=Plugins
+icon=icon.png
+# experimental flag
+experimental=False
+
+# deprecated flag (applies to the whole plugin, not just a single version)
+deprecated=False
+
+# Since QGIS 3.8, a comma separated list of plugins to be installed
+# (or upgraded) can be specified.
+# Check the documentation for more information.
+# plugin_dependencies=
+
+Category of the plugin: Raster, Vector, Database or Web
+# category=
+
+# If the plugin can run on QGIS Server.
+server=False
+

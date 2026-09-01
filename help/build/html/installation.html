@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+
+<html lang="fr" data-content_root="./">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Installation &#8212; Documentation GeoITV 1.0.0</title>
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="_static/classic.css?v=2bf1fcf8" />
+    
+    <script src="_static/documentation_options.js?v=05dadb3a"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/translations.js?v=e6b791cb"></script>
+    
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Recherche" href="search.html" />
+    <link rel="next" title="Utilisation" href="utilisation.html" />
+    <link rel="prev" title="À propos" href="a-propos.html" /> 
+  </head><body>
+    <div class="related" role="navigation" aria-label="Related">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="genindex.html" title="Index général"
+             accesskey="I">index</a></li>
+        <li class="right" >
+          <a href="utilisation.html" title="Utilisation"
+             accesskey="N">suivant</a> |</li>
+        <li class="right" >
+          <a href="a-propos.html" title="À propos"
+             accesskey="P">précédent</a> |</li>
+        <li class="nav-item nav-item-0"><a href="index.html">Documentation GeoITV 1.0.0</a> &#187;</li>
+        <li class="nav-item nav-item-this"><a href="">Installation</a></li> 
+      </ul>
+    </div>  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <section id="installation">
+<h1>Installation<a class="headerlink" href="#installation" title="Lien vers cette rubrique">¶</a></h1>
+<ol class="arabic simple">
+<li><p>Installez GeoITV depuis le gestionnaire d’extensions QGIS lorsque la version est publiée, ou copiez le dossier du plugin dans le répertoire des extensions QGIS pour une installation manuelle.</p></li>
+<li><p>Activez GeoITV dans le gestionnaire d’extensions.</p></li>
+<li><p>Ouvrez le plugin depuis le menu Extensions.</p></li>
+</ol>
+<p>Le mode standard FullPython ne requiert aucune connexion à une base de données. Il s’exécute dans l’environnement Python de QGIS et requiert la bibliothèque Shapely. GDAL/OGR est fourni par les installations QGIS standards.</p>
+<p>Le mode DB legacy requiert PostgreSQL 12 ou supérieur avec PostGIS 3.4 ou supérieur, ainsi que le schéma <code class="docutils literal notranslate"><span class="pre">itv</span></code> créé avec <code class="docutils literal notranslate"><span class="pre">resources/create_schema_itv.sql</span></code>. Les couches SIG utilisées en base doivent avoir un SRID défini.</p>
+<p>Dépendances principales :
+- QGIS (PyQt, qgis.core)
+- psycopg2 (uniquement pour le mode DB legacy)</p>
+</section>
+
+
+            <div class="clearer"></div>
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+  <div>
+    <h4>Sujet précédent</h4>
+    <p class="topless"><a href="a-propos.html"
+                          title="Chapitre précédent">À propos</a></p>
+  </div>
+  <div>
+    <h4>Sujet suivant</h4>
+    <p class="topless"><a href="utilisation.html"
+                          title="Chapitre suivant">Utilisation</a></p>
+  </div>
+  <div role="note" aria-label="source link">
+    <h3>Cette page</h3>
+    <ul class="this-page-menu">
+      <li><a href="_sources/installation.rst.txt"
+            rel="nofollow">Montrer le code source</a></li>
+    </ul>
+   </div>
+<search id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Recherche rapide</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="related" role="navigation" aria-label="Related">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="genindex.html" title="Index général"
+             >index</a></li>
+        <li class="right" >
+          <a href="utilisation.html" title="Utilisation"
+             >suivant</a> |</li>
+        <li class="right" >
+          <a href="a-propos.html" title="À propos"
+             >précédent</a> |</li>
+        <li class="nav-item nav-item-0"><a href="index.html">Documentation GeoITV 1.0.0</a> &#187;</li>
+        <li class="nav-item nav-item-this"><a href="">Installation</a></li> 
+      </ul>
+    </div>
+    <div class="footer" role="contentinfo">
+    &#169; Copyright 2025, NAOMIS.
+      Créé en utilisant <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.2.3.
+    </div>
+  </body>
+</html>

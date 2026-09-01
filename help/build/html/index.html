@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+
+<html lang="fr" data-content_root="./">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>GeoITV &#8212; Documentation GeoITV 1.0.0</title>
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+    <link rel="stylesheet" type="text/css" href="_static/classic.css?v=2bf1fcf8" />
+    
+    <script src="_static/documentation_options.js?v=05dadb3a"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/translations.js?v=e6b791cb"></script>
+    
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Recherche" href="search.html" />
+    <link rel="next" title="À propos" href="a-propos.html" /> 
+  </head><body>
+    <div class="related" role="navigation" aria-label="Related">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="genindex.html" title="Index général"
+             accesskey="I">index</a></li>
+        <li class="right" >
+          <a href="a-propos.html" title="À propos"
+             accesskey="N">suivant</a> |</li>
+        <li class="nav-item nav-item-0"><a href="#">Documentation GeoITV 1.0.0</a> &#187;</li>
+        <li class="nav-item nav-item-this"><a href="">GeoITV</a></li> 
+      </ul>
+    </div>  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <section id="geoitv">
+<h1>GeoITV<a class="headerlink" href="#geoitv" title="Lien vers cette rubrique">¶</a></h1>
+<a class="reference internal image-reference" href="_images/icon_180x180.png"><img alt="Logo GeoITV" class="align-center" src="_images/icon_180x180.png" style="width: 120px;" />
+</a>
+<p class="centered">
+<strong><strong>GeoITV</strong></strong></p><p>GeoITV, c’est l’outil open source pour intégrer et exploiter les inspections vidéo de réseaux d’assainissement dans QGIS.</p>
+<p>À partir d’un fichier <strong>TXT</strong> normé <cite>NF EN 13508-2+A1</cite> :</p>
+<ul class="simple">
+<li><p>déterminez la position précise des défauts observés,</p></li>
+<li><p>recensez les regards et branchements,</p></li>
+<li><p>visualisez l’emprise de l’inspection et tous les objets détectés lors de l’inspection ITV.</p></li>
+</ul>
+<a class="reference internal image-reference" href="_images/illu1.png"><img alt="Illustration GeoITV" class="align-center" src="_images/illu1.png" style="width: 80%;" />
+</a>
+<p>En quelques clics, vos données ITV deviennent exploitables, croisées avec vos couches SIG, pour un suivi technique et patrimonial efficace.</p>
+<section id="utilisation-et-integration">
+<h2>Utilisation et intégration<a class="headerlink" href="#utilisation-et-integration" title="Lien vers cette rubrique">¶</a></h2>
+<p><strong>Prérequis :</strong></p>
+<ul class="simple">
+<li><p>Une couche SIG de regards doit être accessible dans QGIS.</p></li>
+<li><p>Une couche SIG de collecteurs est facultative.</p></li>
+<li><p>Le mode standard <strong>FullPython</strong> ne nécessite pas de base de données.</p></li>
+</ul>
+<p><strong>Étapes principales :</strong></p>
+<ol class="arabic simple">
+<li><p>Sélectionnez le fichier .txt d’inspection ITV à importer (format NF EN 13508-2+A1).</p></li>
+<li><p>Sélectionnez la couche SIG des regards (et éventuellement la couche des collecteurs).</p></li>
+<li><p>Indiquez le champ identifiant unique de la couche (ex : id_regard).</p></li>
+<li><p>(Optionnel) Joignez un fichier de correspondance si les identifiants ITV et SIG diffèrent.</p></li>
+<li><p>Lancez le traitement : les défauts, branchements et emprises sont automatiquement géolocalisés dans des couches mémoire QGIS.</p></li>
+</ol>
+<p>Chaque objet est rattaché à son identifiant SIG lorsque celui-ci est disponible, et l’ensemble des résultats est visualisable directement dans QGIS. Le mode DB legacy est disponible dans la configuration pour les workflows nécessitant PostgreSQL/PostGIS.</p>
+</section>
+<section id="fichier-de-correspondances-la-cle-dune-integration-fiable">
+<h2>Fichier de correspondances : la clé d’une intégration fiable<a class="headerlink" href="#fichier-de-correspondances-la-cle-dune-integration-fiable" title="Lien vers cette rubrique">¶</a></h2>
+<p>Lors de l’import, il est fréquent que les identifiants utilisés dans les fichiers d’inspection (collecteurs, regards, etc.) diffèrent de ceux de votre SIG (noms, formats, conventions). Le fichier de correspondance permet de faire le lien entre ces deux mondes :</p>
+<ul class="simple">
+<li><p>Il associe chaque identifiant du fichier d’inspection à l’identifiant officiel de votre base SIG.</p></li>
+<li><p>Il garantit que les données importées sont correctement reliées à vos objets existants.</p></li>
+</ul>
+<p>Ce fichier doit être au format CSV, avec au minimum :</p>
+<ul class="simple">
+<li><p>une colonne pour l’identifiant du fichier d’inspection</p></li>
+<li><p>une colonne pour l’identifiant SIG correspondant</p></li>
+</ul>
+<p>Exemple de structure :</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">id_reg</span> <span class="p">(</span><span class="n">ou</span> <span class="n">coll</span><span class="p">),</span><span class="n">id_sig</span>
+<span class="n">RG_001</span><span class="p">,</span><span class="n">R_000145</span>
+<span class="n">RG_002</span><span class="p">,</span><span class="n">R_000278</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="script-sql-de-creation-du-schema-itv">
+<h1>Script SQL de création du schéma itv<a class="headerlink" href="#script-sql-de-creation-du-schema-itv" title="Lien vers cette rubrique">¶</a></h1>
+<p>Le schéma <cite>itv</cite> n’est requis que pour le mode DB legacy. Le mode standard FullPython fonctionne sans base de données.</p>
+<p>⚠️ <strong>Prérequis :</strong></p>
+<ul class="simple">
+<li><p>Disposer d’une base PostgreSQL <strong>version 12 ou supérieure</strong> avec PostGIS <strong>3.4 ou supérieur</strong>.</p></li>
+<li><p>Détenir les droits suffisants pour créer l’extension PostGIS, le schéma <cite>itv</cite> et ses objets associés.</p></li>
+<li><p>Utiliser des couches SIG dont le SRID est défini. Les calculs métriques sont réalisés en EPSG:2154.</p></li>
+</ul>
+<dl class="simple">
+<dt>Le script SQL de création du schéma est fourni avec le plugin :</dt><dd><p><code class="docutils literal notranslate"><span class="pre">resources/create_schema_itv.sql</span></code></p>
+</dd>
+</dl>
+<p>Ce fichier contient le script SQL complet permettant de créer le schéma <cite>itv</cite> et toutes ses tables, fonctions et objets nécessaires pour l’intégration des inspections ITV dans votre base PostgreSQL/PostGIS.</p>
+<p><strong>Télécharger le script SQL :</strong></p>
+<p><a class="reference external" href="../../../resources/create_schema_itv.sql">create_schema_itv.sql</a></p>
+<div class="admonition warning">
+<p class="admonition-title">Avertissement</p>
+<p>L’exécution de ce script peut écraser des données existantes si le schéma <cite>itv</cite> est déjà présent. Vérifiez toujours avant d’exécuter !</p>
+</div>
+<div class="toctree-wrapper compound">
+<p class="caption" role="heading"><span class="caption-text">Sommaire</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="a-propos.html">À propos</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="utilisation.html">Utilisation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="contribution.html">Contribution</a></li>
+</ul>
+</div>
+</section>
+<section id="indices-et-tables">
+<h1>Indices et tables<a class="headerlink" href="#indices-et-tables" title="Lien vers cette rubrique">¶</a></h1>
+<ul class="simple">
+<li><p><a class="reference internal" href="genindex.html"><span class="std std-ref">Index</span></a></p></li>
+<li><p><a class="reference internal" href="py-modindex.html"><span class="std std-ref">Index du module</span></a></p></li>
+<li><p><a class="reference internal" href="search.html"><span class="std std-ref">Page de recherche</span></a></p></li>
+</ul>
+<p>GeoITV est un projet open source, pensé pour et avec la communauté SIG et QGIS. Le code est distribué sous licence <strong>MIT</strong> : vous pouvez l’utiliser, le modifier, le partager et l’améliorer librement. Toutes les contributions sont les bienvenues pour faire avancer l’outil et le rendre utile au plus grand nombre !</p>
+</section>
+
+
+            <div class="clearer"></div>
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+  <div>
+    <h3><a href="#">Table des matières</a></h3>
+    <ul>
+<li><a class="reference internal" href="#">GeoITV</a><ul>
+<li><a class="reference internal" href="#utilisation-et-integration">Utilisation et intégration</a></li>
+<li><a class="reference internal" href="#fichier-de-correspondances-la-cle-dune-integration-fiable">Fichier de correspondances : la clé d’une intégration fiable</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#script-sql-de-creation-du-schema-itv">Script SQL de création du schéma itv</a></li>
+<li><a class="reference internal" href="#indices-et-tables">Indices et tables</a></li>
+</ul>
+
+  </div>
+  <div>
+    <h4>Sujet suivant</h4>
+    <p class="topless"><a href="a-propos.html"
+                          title="Chapitre suivant">À propos</a></p>
+  </div>
+  <div role="note" aria-label="source link">
+    <h3>Cette page</h3>
+    <ul class="this-page-menu">
+      <li><a href="_sources/index.rst.txt"
+            rel="nofollow">Montrer le code source</a></li>
+    </ul>
+   </div>
+<search id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Recherche rapide</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="related" role="navigation" aria-label="Related">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="genindex.html" title="Index général"
+             >index</a></li>
+        <li class="right" >
+          <a href="a-propos.html" title="À propos"
+             >suivant</a> |</li>
+        <li class="nav-item nav-item-0"><a href="#">Documentation GeoITV 1.0.0</a> &#187;</li>
+        <li class="nav-item nav-item-this"><a href="">GeoITV</a></li> 
+      </ul>
+    </div>
+    <div class="footer" role="contentinfo">
+    &#169; Copyright 2025, NAOMIS.
+      Créé en utilisant <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.2.3.
+    </div>
+  </body>
+</html>

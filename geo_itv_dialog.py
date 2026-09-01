@@ -1,0 +1,3362 @@
+# -*- coding: utf-8 -*-
+"""Dialogue principal du plugin GeoITV.
+
+SPDX-License-Identifier: MIT
+Copyright (c) 2025 NAOMIS
+"""
+from qgis.PyQt import uic, QtWidgets, QtGui, QtCore
+import csv
+import re
+import traceback
+
+from qgis.core import (
+    QgsSettings,
+    QgsProject,
+    QgsVectorFileWriter,
+    QgsVectorLayer,
+    QgsFillSymbol,
+    QgsField,
+    QgsDistanceArea,
+    QgsWkbTypes,
+)
+
+from .utils.file_parser import FileParser
+from .utils.insert_tables import insert_b01_table, insert_b02_table, insert_b03_table, insert_b04_table, insert_c_table
+from .geo_itv_data import IDS
+from .defect_position import DefectGeometryCalculator
+from .branch_position import BranchGeometryCalculator
+from .inspection_data import InspectionGeometryCalculator
+from .branch_lines import BcaGeometryCalculator
+
+
+import psycopg2
+from psycopg2 import sql
+
+# This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
+import os
+FORM_CLASS, _ = uic.loadUiType(os.path.join(
+    os.path.dirname(__file__), 'geo_itv_dialog_base.ui'))
+
+SETTINGS_KEY_USE_DB_VIEWS = "GeoITV/use_db_views"
+SETTINGS_KEY_LOG_LEVEL = "GeoITV/log_level"
+
+
+def _read_bool_setting(key, default=False):
+    """
+    Lit un booléen dans QgsSettings de manière robuste.
+    """
+    value = QgsSettings().value(key, default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text in ("1", "true", "yes", "y", "on")
+
+class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
+    def showEvent(self, event):
+        """
+        Recalcule l'UI selon le mode à l'affichage réel du dialogue.
+        """
+        super(GeoITVDialog, self).showEvent(event)
+        QtCore.QTimer.singleShot(0, self.refresh_mode_ui)
+        QtCore.QTimer.singleShot(0, self._initialize_layer_combos)
+
+    def refresh_mode_ui(self):
+        """
+        Réapplique visibilité et états dynamiques liés au mode.
+        """
+        self._apply_mode_ui_visibility()
+        self.update_btExecute_enabled()
+
+    def _apply_mode_dialog_height(self, use_db_views):
+        """
+        Ajuste la hauteur de la boîte de dialogue selon le mode.
+
+        - Mode FullPython: compacte la fenêtre sur son contenu utile.
+        - Mode DB: restaure une hauteur confortable pour les champs DB.
+        """
+        try:
+            current_width = self.width()
+
+            # Réinitialise les contraintes avant recalcul pour permettre
+            # une vraie réduction après un passage en mode DB.
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(16777215)
+
+            if self.layout() is not None:
+                self.layout().invalidate()
+                self.layout().activate()
+
+            # Ajuste la géométrie Qt au contenu courant (widgets visibles).
+            self.adjustSize()
+            hint_height = self.sizeHint().height()
+
+            if not hasattr(self, '_default_db_dialog_height'):
+                self._default_db_dialog_height = max(self.height(), hint_height)
+
+            if use_db_views:
+                # Libère toute contrainte fixe issue du mode FullPython.
+                self.setMinimumHeight(0)
+                self.setMaximumHeight(16777215)
+                target_height = max(self._default_db_dialog_height, hint_height)
+            else:
+                target_height = hint_height
+
+            if target_height > 0:
+                self.resize(current_width, target_height)
+                if not use_db_views:
+                    # Force la compaction en FullPython, y compris après
+                    # un passage préalable en mode DB.
+                    self.setMinimumHeight(target_height)
+                    self.setMaximumHeight(target_height)
+        except Exception:
+            pass
+
+    def is_db_views_enabled(self):
+        """
+        Retourne le mode d'exécution configuré dans les paramètres plugin.
+        """
+        return _read_bool_setting(SETTINGS_KEY_USE_DB_VIEWS, default=False)
+
+    def db_schema(self):
+        """
+        Retourne le schéma utilisé par le mode DB legacy.
+
+        Les fonctions et insertions SQL historiques ciblent le schéma itv.
+        """
+        return "itv"
+
+    def log_level(self):
+        """
+        Retourne le niveau de verbosité des logs.
+        """
+        raw = QgsSettings().value(SETTINGS_KEY_LOG_LEVEL, "info")
+        level = str(raw).strip().lower() if raw is not None else "info"
+        if level == "verbose":
+            return "debug"
+        if level not in ("error", "warning", "info", "debug"):
+            return "info"
+        return level
+
+    def _should_log(self, level):
+        rank = {"error": 0, "warning": 1, "info": 2, "debug": 3}
+        normalized = str(level or "info").strip().lower()
+        if normalized == "verbose":
+            normalized = "debug"
+        if normalized not in rank:
+            normalized = "info"
+        return rank[normalized] <= rank[self.log_level()]
+
+    def set_progress(self, value):
+        """
+        Définit la valeur de la progressBar si elle existe.
+        """
+        if hasattr(self, 'progressBar') and self.progressBar is not None:
+            try:
+                self.progressBar.setValue(value)
+                QtWidgets.QApplication.processEvents()
+            except Exception:
+                pass
+    
+    def log_info(self, message, raz=False, level="info"):
+        """
+        Affiche un message d'information dans le widget textEdit_log s'il existe, sinon ne fait rien.
+        """
+        if hasattr(self, 'textEdit_log') and self.textEdit_log is not None:
+            try:
+                if raz:
+                    self.textEdit_log.clear()
+                normalized_level = str(level or "info").strip().lower()
+                message_text = str(message)
+                if (
+                    normalized_level == "info"
+                    and message_text.lstrip().lower().startswith(("erreur", "impossible"))
+                ):
+                    normalized_level = "error"
+                if not self._should_log(normalized_level):
+                    return
+                styles = {
+                    "error": "#b00020",
+                    "warning": "#9c5700",
+                    "success": "#1b5e20",
+                    "startup": "#005a9c",
+                }
+                display_level = normalized_level
+                message_start = message_text.lstrip().lower()
+                if normalized_level == "info":
+                    if message_start.startswith("démarrage de geoitv"):
+                        display_level = "startup"
+                    elif message_start.startswith("traitement terminé avec succès"):
+                        display_level = "success"
+                cursor = self.textEdit_log.textCursor()
+                cursor.movePosition(QtGui.QTextCursor.End)
+                char_format = QtGui.QTextCharFormat()
+                color = styles.get(display_level)
+                if color:
+                    char_format.setForeground(QtGui.QColor(color))
+                    char_format.setFontWeight(QtGui.QFont.DemiBold)
+                cursor.insertText(message_text, char_format)
+                cursor.insertBlock()
+                self.textEdit_log.setTextCursor(cursor)
+                self.textEdit_log.ensureCursorVisible()
+            except Exception:
+                pass
+
+    def log_exception(self, context, exception):
+        """
+        Journalise une erreur lisible par l'utilisateur et sa trace en Debug.
+        """
+        self.log_info(f"{context} : {exception}", level="error")
+        self.log_info(
+            f"Trace technique ({context}) :\n{traceback.format_exc()}",
+            level="debug",
+        )
+
+    def _apply_mode_ui_visibility(self):
+        """
+        Adapte l'étape connexion selon le mode d'exécution.
+        """
+        use_db_views = self.is_db_views_enabled()
+
+        for widget_name in ('label_16', 'label_9', 'cmbConnexionBDD', 'btTestConnexion', 'line_9'):
+            if hasattr(self, widget_name):
+                widget = getattr(self, widget_name)
+                try:
+                    widget.setVisible(use_db_views)
+                    widget.setEnabled(use_db_views)
+                    if use_db_views:
+                        widget.setMaximumHeight(16777215)
+                    else:
+                        widget.setMaximumHeight(0)
+                except Exception:
+                    pass
+
+        if hasattr(self, 'label_16') and use_db_views:
+            try:
+                self.label_16.setText("Connexion à la base de données ITV")
+            except Exception:
+                pass
+
+        if hasattr(self, 'cbClearHistory'):
+            try:
+                self.cbClearHistory.setVisible(use_db_views)
+                self.cbClearHistory.setEnabled(use_db_views)
+            except Exception:
+                pass
+
+        if hasattr(self, 'label_clear_history_help'):
+            try:
+                self.label_clear_history_help.setVisible(use_db_views)
+                self.label_clear_history_help.setEnabled(use_db_views)
+            except Exception:
+                pass
+
+        if hasattr(self, 'line'):
+            try:
+                self.line.setVisible(use_db_views)
+                self.line.setEnabled(use_db_views)
+            except Exception:
+                pass
+
+        # Réduit l'espace vertical résiduel en mode FullPython.
+        try:
+            layout = self.findChild(QtWidgets.QVBoxLayout, 'connexionLayout')
+            if layout is not None:
+                if use_db_views:
+                    layout.setSpacing(6)
+                    layout.setContentsMargins(0, 0, 0, 0)
+                else:
+                    layout.setSpacing(0)
+                    layout.setContentsMargins(0, 0, 0, 0)
+        except Exception:
+            pass
+
+        # Compacte l'UI en mode FullPython pour éviter les grands vides.
+        try:
+            compact = not use_db_views
+
+            main_left_layout = self.findChild(QtWidgets.QVBoxLayout, 'verticalLayout')
+            if main_left_layout is not None:
+                # Réinitialise les stretches puis répartit l'espace vertical.
+                for idx in range(main_left_layout.count()):
+                    main_left_layout.setStretch(idx, 0)
+
+                if compact:
+                    # FullPython: répartir le surplus entre les sections visibles
+                    # pour éviter un unique trou gris avant le bouton Exécuter.
+                    for idx in (2, 4, 6, 8, 12):
+                        if idx < main_left_layout.count():
+                            main_left_layout.setStretch(idx, 1)
+                else:
+                    # DB: conserver un comportement classique avec bouton bas.
+                    if 12 < main_left_layout.count():
+                        main_left_layout.setStretch(12, 1)
+
+            for layout_name in ('verticalLayout', 'informationsLayout', 'txtLaout'):
+                layout = self.findChild(QtWidgets.QLayout, layout_name)
+                if layout is None:
+                    continue
+                if compact:
+                    layout.setSpacing(2)
+                    layout.setContentsMargins(0, 0, 0, 0)
+                else:
+                    layout.setSpacing(4)
+                    layout.setContentsMargins(0, 0, 0, 0)
+
+            grid_infos = self.findChild(QtWidgets.QGridLayout, 'gridLayout')
+            if grid_infos is not None:
+                if compact:
+                    grid_infos.setHorizontalSpacing(4)
+                    grid_infos.setVerticalSpacing(2)
+                else:
+                    grid_infos.setHorizontalSpacing(6)
+                    grid_infos.setVerticalSpacing(4)
+                grid_infos.setContentsMargins(0, 0, 0, 0)
+
+            # Hauteurs plus compactes sur les champs d'infos et de fichier TXT.
+            for widget_name in ('lineEdit_entreprise', 'lineEdit_rapport', 'inputFileTXT'):
+                if not hasattr(self, widget_name):
+                    continue
+                widget = getattr(self, widget_name)
+                if compact:
+                    policy = widget.sizePolicy()
+                    policy.setVerticalPolicy(QtWidgets.QSizePolicy.Fixed)
+                    widget.setSizePolicy(policy)
+                    widget.setMaximumHeight(24)
+                else:
+                    policy = widget.sizePolicy()
+                    policy.setVerticalPolicy(QtWidgets.QSizePolicy.Preferred)
+                    widget.setSizePolicy(policy)
+                    widget.setMaximumHeight(16777215)
+
+            # Les libellés de sections et d'aide restent compacts en FullPython.
+            for widget_name in ('label_17', 'label_12', 'label_13', 'label_18', 'label_14'):
+                if not hasattr(self, widget_name):
+                    continue
+                widget = getattr(self, widget_name)
+                policy = widget.sizePolicy()
+                if compact:
+                    policy.setVerticalPolicy(QtWidgets.QSizePolicy.Fixed)
+                    widget.setMaximumHeight(30)
+                else:
+                    policy.setVerticalPolicy(QtWidgets.QSizePolicy.Preferred)
+                    widget.setMaximumHeight(16777215)
+                widget.setSizePolicy(policy)
+
+            if main_left_layout is not None:
+                main_left_layout.invalidate()
+                main_left_layout.activate()
+        except Exception:
+            pass
+
+        # Ajuste la hauteur au plus juste après les changements de visibilité.
+        self._apply_mode_dialog_height(use_db_views)
+        QtCore.QTimer.singleShot(0, lambda: self._apply_mode_dialog_height(use_db_views))
+
+
+    def __init__(self, parent=None):
+        """
+        Constructeur du dialogue principal du plugin GeoITV.
+        Initialise l'UI, connecte les boutons et prépare la gestion dynamique de l'état du bouton d'exécution.
+        """
+        super(GeoITVDialog, self).__init__(parent)
+        self.setupUi(self)
+
+        # Ajuste la lisibilite generale de l'UI (hors titres d'etapes)
+        # et redonne de la place a la zone de logs.
+        self._apply_ui_tuning()
+
+        # Etat courant du traitement ITV
+        self.inspection_gid = None
+        self.details = []
+        self._local_inspection_counter = 0
+        self._reg_correspondance_map = {}
+        self._coll_correspondance_map = {}
+        self.current_txt_file = None
+        self.inspection_metadata = {}
+
+        # Connexion des boutons principaux
+        self.btTestConnexion.clicked.connect(self.test_connexion)
+        self.btExecute.clicked.connect(self.execute)
+
+        if hasattr(self, 'cbClearHistory'):
+            try:
+                self.cbClearHistory.setText("Réinitialiser l'historique DB avant import")
+                self.cbClearHistory.setToolTip(
+                    "Mode DB uniquement : vide les inspections existantes et supprime les tables temporaires du schéma avant l'import."
+                )
+            except Exception:
+                pass
+
+        # État initial du bouton d'exécution
+        self._apply_mode_ui_visibility()
+        self.update_btExecute_enabled()
+
+        # Connexion des signaux pour activer/désactiver dynamiquement le bouton d'exécution
+        if hasattr(self, 'cmbConnexionBDD'):
+            self.cmbConnexionBDD.currentIndexChanged.connect(self.update_btExecute_enabled)
+        if hasattr(self, 'inputFileTXT'):
+            self.inputFileTXT.fileChanged.connect(self.update_btExecute_enabled)
+        if hasattr(self, 'mapLayerComboBox_regard'):
+            self.mapLayerComboBox_regard.layerChanged.connect(self.update_btExecute_enabled)
+            self.mapLayerComboBox_regard.layerChanged.connect(self._sync_regard_field_combo)
+        if hasattr(self, 'mapLayerComboBox_collecteur'):
+            self.mapLayerComboBox_collecteur.layerChanged.connect(self._sync_collecteur_field_combo)
+
+        # Synchronisation initiale des combos de champs quand une couche est
+        # déjà auto-sélectionnée par QGIS.
+        self._auto_select_single_collecteur_layer()
+        self._sync_field_combos_from_current_layers()
+
+        # Deuxième passe différée: certains widgets QGIS finalisent leur état
+        # juste après l'affichage de la boîte de dialogue.
+        QtCore.QTimer.singleShot(0, self._initialize_layer_combos)
+
+    def _initialize_layer_combos(self):
+        """
+        Finalise les sélections automatiques une fois les widgets QGIS prêts.
+        """
+        self._auto_select_single_collecteur_layer()
+        self._sync_field_combos_from_current_layers()
+
+    def _auto_select_single_collecteur_layer(self):
+        """
+        Sélectionne l'unique couche vectorielle linéaire du projet si le
+        collecteur optionnel n'est pas encore renseigné.
+        """
+        if not hasattr(self, 'mapLayerComboBox_collecteur'):
+            return
+
+        try:
+            if self.mapLayerComboBox_collecteur.currentLayer() is not None:
+                return
+
+            candidates = [
+                layer for layer in QgsProject.instance().mapLayers().values()
+                if isinstance(layer, QgsVectorLayer)
+                and layer.isValid()
+                and layer.geometryType() == QgsWkbTypes.LineGeometry
+                and not layer.name().startswith("itv_details_bcht_lines")
+                and layer.name() != "Orientation_branchement"
+            ]
+            if len(candidates) == 1:
+                self.mapLayerComboBox_collecteur.setLayer(candidates[0])
+        except Exception:
+            pass
+
+    def _sync_regard_field_combo(self, layer=None):
+        """
+        Force la mise à jour du combo des champs identifiants des regards.
+        """
+        if not hasattr(self, 'fieldComboBox_regard'):
+            return
+
+        if layer is None and hasattr(self, 'mapLayerComboBox_regard'):
+            try:
+                layer = self.mapLayerComboBox_regard.currentLayer()
+            except Exception:
+                layer = None
+
+        try:
+            self.fieldComboBox_regard.setLayer(layer)
+            if layer is not None and self.fieldComboBox_regard.currentIndex() < 0 and self.fieldComboBox_regard.count() > 0:
+                self.fieldComboBox_regard.setCurrentIndex(0)
+        except Exception:
+            pass
+
+    def _sync_collecteur_field_combo(self, layer=None):
+        """
+        Force la mise à jour du combo des champs identifiants des collecteurs.
+        """
+        if not hasattr(self, 'fieldComboBox_collecteur'):
+            return
+
+        if layer is None and hasattr(self, 'mapLayerComboBox_collecteur'):
+            try:
+                layer = self.mapLayerComboBox_collecteur.currentLayer()
+            except Exception:
+                layer = None
+
+        try:
+            self.fieldComboBox_collecteur.setLayer(layer)
+            if layer is not None and self.fieldComboBox_collecteur.currentIndex() < 0 and self.fieldComboBox_collecteur.count() > 0:
+                self.fieldComboBox_collecteur.setCurrentIndex(0)
+            elif layer is None:
+                self.fieldComboBox_collecteur.setCurrentIndex(-1)
+        except Exception:
+            pass
+
+    def _sync_field_combos_from_current_layers(self):
+        """
+        Synchronise les combos de champs avec les couches actuellement
+        sélectionnées (cas auto-sélection sans interaction utilisateur).
+        """
+        self._sync_regard_field_combo()
+        self._sync_collecteur_field_combo()
+
+    def _apply_ui_tuning(self):
+        """
+        Uniformise la taille de police des controles non titres et
+        améliore la largeur de la zone de logs.
+        """
+        try:
+            base_font = self.font()
+            base_font.setPointSize(9)
+            self.setFont(base_font)
+        except Exception:
+            pass
+
+        if hasattr(self, 'textEdit_log') and self.textEdit_log is not None:
+            try:
+                log_font = QtGui.QFont("Consolas", 9)
+                log_font.setStyleHint(QtGui.QFont.Monospace)
+                log_font.setFixedPitch(True)
+                self.textEdit_log.setFont(log_font)
+                self.textEdit_log.setMinimumWidth(340)
+            except Exception:
+                pass
+
+        splitter = self.findChild(QtWidgets.QSplitter, 'splitter')
+        if splitter is not None:
+            try:
+                splitter.setStretchFactor(0, 3)
+                splitter.setStretchFactor(1, 2)
+                splitter.setSizes([560, 380])
+            except Exception:
+                pass
+
+    def update_btExecute_enabled(self):
+        """
+        Active le bouton d'exécution uniquement si tous les champs obligatoires sont renseignés :
+        - Connexion BDD (mode legacy SQL)
+        - Fichier TXT
+        - Couche regard
+        """
+        use_db_views = self.is_db_views_enabled()
+        has_conn = not use_db_views
+        has_txt = False
+        has_regard = False
+
+        if use_db_views and hasattr(self, 'cmbConnexionBDD'):
+            has_conn = bool(self.cmbConnexionBDD.currentText())
+        if hasattr(self, 'inputFileTXT'):
+            # inputFileTXT peut être un widget fichier ou un QLineEdit
+            try:
+                has_txt = bool(self.inputFileTXT.filePath())
+            except Exception:
+                has_txt = bool(self.inputFileTXT.text())
+        if hasattr(self, 'mapLayerComboBox_regard'):
+            try:
+                has_regard = self.mapLayerComboBox_regard.currentLayer() is not None
+            except Exception:
+                has_regard = False
+
+        enabled = has_conn and has_txt and has_regard
+        if hasattr(self, 'btExecute'):
+            self.btExecute.setEnabled(enabled)
+
+    def _next_local_inspection_gid(self):
+        """
+        Retourne un identifiant local négatif pour le mode full Python.
+        """
+        self._local_inspection_counter += 1
+        return -self._local_inspection_counter
+
+    def _remove_layers_by_names(self, layer_names):
+        """
+        Supprime les couches du projet dont le nom est dans `layer_names`.
+        """
+        name_set = set(layer_names)
+        for layer in list(QgsProject.instance().mapLayers().values()):
+            if layer.name() in name_set:
+                QgsProject.instance().removeMapLayer(layer.id())
+
+    def _apply_qml_style(self, layer, qml_filename):
+        """
+        Applique un style QML si le fichier existe, sinon laisse le style courant.
+        """
+        try:
+            qml_path = os.path.join(os.path.dirname(__file__), 'styles', qml_filename)
+            if os.path.exists(qml_path):
+                layer.loadNamedStyle(qml_path)
+                layer.triggerRepaint()
+                return True
+        except Exception as e:
+            self.log_info(f"Impossible d'appliquer le style QML {qml_filename} : {e}")
+        return False
+
+    def _clean_identifier(self, value):
+        if value is None:
+            return None
+        text = str(value).strip().strip('"')
+        return text if text else None
+
+    def _null_if_blank(self, value):
+        """Retourne NULL pour les chaînes vides ou composées d'espaces."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    def _log_db_id_issues(self, layer, id_field, entity_label, check_lengths=False):
+        """Signale les correspondances SIG absentes et écarts de longueur DB."""
+        field_names = {field.name() for field in layer.fields()}
+        if id_field not in field_names or "id_sig" not in field_names:
+            return
+
+        missing_ids = set()
+        for feature in layer.getFeatures():
+            id_sig = self._null_if_blank(feature["id_sig"])
+            if id_sig is None:
+                id_itv = self._null_if_blank(feature[id_field])
+                if id_itv is not None:
+                    missing_ids.add(str(id_itv))
+
+        if missing_ids:
+            self.log_info(
+                f"Correspondance SIG introuvable pour le(s) {entity_label} ITV : "
+                + ", ".join(sorted(missing_ids)),
+                level="error",
+            )
+
+        if not check_lengths or not {
+            "longueur_troncon_itv", "longueur_troncon_sig"
+        }.issubset(field_names):
+            return
+
+        for feature in layer.getFeatures():
+            try:
+                length_itv = float(feature["longueur_troncon_itv"])
+                length_sig = float(feature["longueur_troncon_sig"])
+            except (TypeError, ValueError):
+                continue
+
+            delta = abs(length_sig - length_itv)
+            if delta > 2.0:
+                self.log_info(
+                    f"Écart de longueur supérieur à 2 m pour le collecteur "
+                    f"ITV {feature[id_field]} : SIG={length_sig:.2f} m, "
+                    f"ITV={length_itv:.2f} m, delta={delta:.2f} m.",
+                    level="warning",
+                )
+
+    def _parse_date_text(self, value):
+        """
+        Normalise une date texte en format ISO (YYYY-MM-DD) si possible.
+        """
+        text = self._clean_identifier(value)
+        if text is None:
+            return None
+
+        for fmt in ("yyyy-MM-dd", "dd/MM/yyyy", "dd-MM-yyyy", "yyyyMMdd"):
+            qdate = QtCore.QDate.fromString(text, fmt)
+            if qdate.isValid():
+                return qdate.toString("yyyy-MM-dd")
+
+        return text
+
+    def _build_full_python_inspection_metadata(self, file_path, details):
+        """
+        Construit des métadonnées proches de la vue SQL v_inspection.
+        """
+        details = details or []
+
+        date_values = []
+        remarks = []
+        total_length = 0.0
+        has_length = False
+
+        for detail in details:
+            for row in getattr(detail, "b_rows", None) or []:
+                date_raw = getattr(row, "ABF", None)
+                date_value = self._parse_date_text(date_raw)
+                if date_value:
+                    date_values.append(date_value)
+
+                remark_raw = self._clean_identifier(getattr(row, "ADE", None))
+                if remark_raw:
+                    remarks.append(remark_raw)
+
+                length_raw = self._clean_identifier(getattr(row, "ACG", None))
+                if length_raw is not None:
+                    try:
+                        total_length += float(length_raw.replace(",", "."))
+                        has_length = True
+                    except Exception:
+                        pass
+
+        date_deb = min(date_values) if date_values else None
+        date_fin = max(date_values) if date_values else None
+
+        rapport = self.lineEdit_rapport.text().strip() if hasattr(self, 'lineEdit_rapport') else None
+        entreprise = self.lineEdit_entreprise.text().strip() if hasattr(self, 'lineEdit_entreprise') else None
+
+        return {
+            "nature_res": None,
+            "type_eau": None,
+            "date_deb": date_deb,
+            "date_fin": date_fin,
+            "entreprise": entreprise or None,
+            "longueur": total_length if has_length else None,
+            "nom_plan": rapport or None,
+            "nom_rapport": rapport or None,
+            "nom_txt": file_path,
+            "remarques": "".join(remarks) if remarks else None,
+        }
+
+    def _safe_len(self, value):
+        """
+        Retourne une taille exploitable pour le debug, sinon 0.
+        """
+        try:
+            return len(value)
+        except Exception:
+            return 0
+
+    def _log_debug_passages(self, metadata, passages, details, file_path):
+        """
+        Produit des logs détaillés de parsing (niveau debug).
+        """
+        self.log_info(f"Fichier TXT : {file_path}", level="debug")
+        self.log_info(
+            "Résumé parsing : "
+            f"metadata={self._safe_len(metadata)} clé(s), "
+            f"passages={self._safe_len(passages)}, "
+            f"details={self._safe_len(details)}.",
+            level="debug"
+        )
+
+        for idx, passage in enumerate(passages or [], 1):
+            n_passage = passage.get("n_passage") if isinstance(passage, dict) else None
+            tables = passage.get("tables", {}) if isinstance(passage, dict) else {}
+            table_names = sorted(tables.keys()) if isinstance(tables, dict) else []
+            self.log_info(
+                f"Passage {idx}/{self._safe_len(passages)} "
+                f"(n_passage={n_passage}) tables={table_names}",
+                level="debug"
+            )
+
+            if not isinstance(tables, dict):
+                continue
+
+            for table_name in table_names:
+                payload = tables.get(table_name)
+                self.log_info(
+                    f"  - {table_name}: {self._safe_len(payload)} ligne(s)",
+                    level="debug"
+                )
+
+    def _enrich_itv_inspection_layer_full_python(self, layer):
+        """
+        Ajoute/remplit les champs de v_inspection sur la couche mémoire
+        FullPython.
+        """
+        if layer is None or not layer.isValid():
+            return
+
+        expected_fields = [
+            ("nature_res", QtCore.QVariant.String),
+            ("type_eau", QtCore.QVariant.String),
+            ("date_deb", QtCore.QVariant.String),
+            ("date_fin", QtCore.QVariant.String),
+            ("entreprise", QtCore.QVariant.String),
+            ("longueur", QtCore.QVariant.Double),
+            ("nom_plan", QtCore.QVariant.String),
+            ("nom_rapport", QtCore.QVariant.String),
+            ("nom_txt", QtCore.QVariant.String),
+            ("remarques", QtCore.QVariant.String),
+        ]
+
+        provider = layer.dataProvider()
+        existing = {f.name() for f in layer.fields()}
+        to_add = [QgsField(name, ftype) for name, ftype in expected_fields if name not in existing]
+        if to_add:
+            provider.addAttributes(to_add)
+            layer.updateFields()
+
+        if layer.featureCount() == 0:
+            return
+
+        metadata = getattr(self, "inspection_metadata", None) or {}
+        field_index = {f.name(): i for i, f in enumerate(layer.fields())}
+
+        updates = {}
+        for feature in layer.getFeatures():
+            row_update = {}
+            for key, value in metadata.items():
+                idx = field_index.get(key)
+                if idx is not None:
+                    row_update[idx] = value
+            if row_update:
+                updates[feature.id()] = row_update
+
+        if updates:
+            provider.changeAttributeValues(updates)
+
+    def _normalize_identifier(self, value):
+        text = self._clean_identifier(value)
+        if text is None:
+            return None
+        return text.lstrip("0") or "0" if text.isdigit() else text.upper()
+
+    def _read_correspondance_csv(self, csv_path, key_candidates):
+        """
+        Lit un CSV de correspondance et retourne un dict {id_itv_norm: id_sig}.
+        """
+        mapping = {}
+
+        with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+            sample = f.read(4096)
+            f.seek(0)
+
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+            except Exception:
+                class _FallbackDialect(csv.Dialect):
+                    delimiter = ","
+                    quotechar = '"'
+                    escapechar = None
+                    doublequote = True
+                    skipinitialspace = True
+                    lineterminator = "\n"
+                    quoting = csv.QUOTE_MINIMAL
+                dialect = _FallbackDialect
+
+            reader = csv.DictReader(f, dialect=dialect)
+            if not reader.fieldnames:
+                return mapping
+
+            normalized_headers = {
+                h.strip().lower(): h for h in reader.fieldnames if h is not None
+            }
+
+            key_field = None
+            for candidate in key_candidates:
+                if candidate in normalized_headers:
+                    key_field = normalized_headers[candidate]
+                    break
+
+            sig_field = normalized_headers.get("id_sig")
+
+            if key_field is None or sig_field is None:
+                raise ValueError(
+                    f"Le CSV doit contenir les colonnes {key_candidates} et 'id_sig'."
+                )
+
+            for row in reader:
+                key_raw = self._clean_identifier(row.get(key_field))
+                sig_raw = self._clean_identifier(row.get(sig_field))
+                key_norm = self._normalize_identifier(key_raw)
+                if key_norm and sig_raw:
+                    mapping[key_norm] = sig_raw
+
+        return mapping
+
+    def _apply_reg_correspondance_full_python(self):
+        """
+        Applique le CSV de correspondance regards (id_itv -> id_sig)
+        directement sur les IDs contenus dans self.details.
+        """
+        self._reg_correspondance_map = {}
+
+        csv_path = self.inputFileCSV_regard.filePath() if hasattr(self, 'inputFileCSV_regard') else None
+        if not csv_path or not os.path.exists(csv_path):
+            self.log_info("Aucun CSV de correspondance regard fourni (mode full Python).")
+            return 0
+
+        try:
+            mapping = self._read_correspondance_csv(csv_path, ["id_itv"])
+        except Exception as e:
+            self.log_info(f"Correspondance regard ignorée (CSV invalide) : {e}")
+            return 0
+
+        self._reg_correspondance_map = mapping
+        if not mapping:
+            self.log_info("CSV regard lu, mais aucune correspondance exploitable.")
+            return 0
+
+        updated = 0
+        for detail in getattr(self, "details", None) or []:
+            for attr_name in ("id_reg_ent", "id_reg_sor"):
+                current = getattr(detail, attr_name, None)
+                original_attr_name = f"_{attr_name}_itv"
+                if getattr(detail, original_attr_name, None) is None:
+                    setattr(detail, original_attr_name, current)
+                replacement = mapping.get(self._normalize_identifier(current))
+                if replacement and replacement != current:
+                    setattr(detail, attr_name, replacement)
+                    updated += 1
+
+            for defect in (getattr(detail, "defauts", None) or []):
+                for attr_name in ("id_reg_ent", "id_reg_sor"):
+                    current = getattr(defect, attr_name, None)
+                    original_attr_name = f"_{attr_name}_itv"
+                    if getattr(defect, original_attr_name, None) is None:
+                        setattr(defect, original_attr_name, current)
+                    replacement = mapping.get(self._normalize_identifier(current))
+                    if replacement and replacement != current:
+                        setattr(defect, attr_name, replacement)
+                        updated += 1
+
+        self.log_info(
+            f"Correspondance regard appliquée en mode full Python ({len(mapping)} clés, {updated} mise(s) à jour)."
+        )
+        return updated
+
+    def _apply_coll_correspondance_full_python(self):
+        """
+        Applique le CSV de correspondance collecteurs (id_troncon/id_itv -> id_sig)
+        directement sur les IDs contenus dans self.details.
+        """
+        self._coll_correspondance_map = {}
+
+        csv_path = self.inputFileCSV_collecteur.filePath() if hasattr(self, 'inputFileCSV_collecteur') else None
+        if not csv_path or not os.path.exists(csv_path):
+            self.log_info("Aucun CSV de correspondance collecteur fourni (mode full Python).")
+            return 0
+
+        try:
+            mapping = self._read_correspondance_csv(csv_path, ["id_troncon", "id_itv"])
+        except Exception as e:
+            self.log_info(f"Correspondance collecteur ignorée (CSV invalide) : {e}")
+            return 0
+
+        self._coll_correspondance_map = mapping
+        if not mapping:
+            self.log_info("CSV collecteur lu, mais aucune correspondance exploitable.")
+            return 0
+
+        updated = 0
+        for detail in getattr(self, "details", None) or []:
+            current = getattr(detail, "id_troncon", None)
+            if getattr(detail, "_id_troncon_itv", None) is None:
+                setattr(detail, "_id_troncon_itv", current)
+            replacement = mapping.get(self._normalize_identifier(current))
+            if replacement and replacement != current:
+                setattr(detail, "id_troncon", replacement)
+                updated += 1
+
+            for defect in (getattr(detail, "defauts", None) or []):
+                current = getattr(defect, "id_troncon", None)
+                if getattr(defect, "_id_troncon_itv", None) is None:
+                    setattr(defect, "_id_troncon_itv", current)
+                replacement = mapping.get(self._normalize_identifier(current))
+                if replacement and replacement != current:
+                    setattr(defect, "id_troncon", replacement)
+                    updated += 1
+
+        self.log_info(
+            f"Correspondance collecteur appliquée en mode full Python ({len(mapping)} clés, {updated} mise(s) à jour)."
+        )
+        return updated
+
+    def load_ids_tables_full_python(self):
+        """
+        Crée des tables mémoire `itv_ids_reg` et `itv_ids_coll` en mode full Python,
+        avec une structure proche des vues SQL `v_itv_physiq_reg/coll`.
+        """
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField, QgsFeature
+
+        details = getattr(self, "details", None) or []
+
+        def clean_text(value):
+            if value is None:
+                return None
+            text = str(value).strip()
+            return text if text else None
+
+        def norm(value):
+            text = clean_text(value)
+            if text is None:
+                return None
+            return text.lstrip("0") or "0" if text.isdigit() else text.upper()
+
+        def parse_float(value):
+            text = clean_text(value)
+            if text is None:
+                return None
+            text = text.replace(",", ".")
+            try:
+                return float(text)
+            except Exception:
+                return None
+
+        def first_non_empty(values):
+            for value in values:
+                text = clean_text(value)
+                if text is not None:
+                    return text
+            return None
+
+        def map_type_mat(acd):
+            mapping = {
+                "AP": "01", "AA": "02", "AH": "03", "AG": "04",
+                "AM": "05", "AO": "06", "AN": "07", "AZ": "08",
+                "AE": "09", "AV": "10", "AX": "11", "AL": "12",
+                "AW": "13", "AK": "14", "Z": "15", "AU": "16", "AR": "17",
+            }
+            code = clean_text(acd)
+            if code is None:
+                return "00"
+            return mapping.get(code.upper(), "00")
+
+        def map_forme_coll(aca):
+            mapping = {
+                "B": "01",
+                "A": "02",
+                "D": "03",
+                "F": "07",
+            }
+            code = clean_text(aca)
+            if code is None:
+                return "00"
+            return mapping.get(code.upper(), "00")
+
+        layer_regard = self.mapLayerComboBox_regard.currentLayer() if hasattr(self, 'mapLayerComboBox_regard') else None
+        layer_collecteur = self.mapLayerComboBox_collecteur.currentLayer() if hasattr(self, 'mapLayerComboBox_collecteur') else None
+
+        id_field_regard = (
+            self.fieldComboBox_regard.currentText()
+            if hasattr(self, 'fieldComboBox_regard') and self.fieldComboBox_regard.currentIndex() >= 0
+            else None
+        )
+        id_field_collecteur = (
+            self.fieldComboBox_collecteur.currentText()
+            if hasattr(self, 'fieldComboBox_collecteur') and self.fieldComboBox_collecteur.currentIndex() >= 0
+            else None
+        )
+
+        reg_sig_by_norm = {}
+        if layer_regard is not None and layer_regard.isValid() and id_field_regard:
+            for feature in layer_regard.getFeatures():
+                try:
+                    value = feature[id_field_regard]
+                except Exception:
+                    continue
+                key = norm(value)
+                if key is not None and key not in reg_sig_by_norm:
+                    reg_sig_by_norm[key] = clean_text(value)
+
+        coll_sig_by_norm = {}
+        coll_length_by_norm = {}
+        if layer_collecteur is not None and layer_collecteur.isValid() and id_field_collecteur:
+            distance = QgsDistanceArea()
+            try:
+                distance.setSourceCrs(layer_collecteur.crs(), QgsProject.instance().transformContext())
+                ellipsoid = QgsProject.instance().ellipsoid()
+                if ellipsoid:
+                    distance.setEllipsoid(ellipsoid)
+            except Exception:
+                distance = None
+
+            for feature in layer_collecteur.getFeatures():
+                try:
+                    value = feature[id_field_collecteur]
+                except Exception:
+                    continue
+                key = norm(value)
+                if key is not None and key not in coll_sig_by_norm:
+                    coll_sig_by_norm[key] = clean_text(value)
+
+                if key is not None and key not in coll_length_by_norm:
+                    length_value = None
+                    geom = feature.geometry()
+                    if geom is not None and not geom.isEmpty():
+                        try:
+                            if distance is not None:
+                                measured = distance.measureLength(geom)
+                                if measured is not None:
+                                    length_value = round(float(measured), 2)
+                        except Exception:
+                            length_value = None
+
+                        if length_value is None:
+                            try:
+                                length_value = round(float(geom.length()), 2)
+                            except Exception:
+                                length_value = None
+
+                    coll_length_by_norm[key] = length_value
+
+        reg_rows = {}
+        coll_rows = {}
+
+        def resolve_id_sig(raw_itv, raw_current, correspondance_map, layer_sig_by_norm):
+            key_itv = norm(raw_itv)
+            key_current = norm(raw_current)
+            id_sig = correspondance_map.get(key_itv)
+            if id_sig is None and key_current is not None:
+                id_sig = correspondance_map.get(key_current)
+            if id_sig is None and key_current is not None:
+                id_sig = layer_sig_by_norm.get(key_current)
+            if id_sig is None:
+                id_sig = layer_sig_by_norm.get(key_itv)
+            return id_sig
+
+        def upsert_reg(raw_itv, raw_current, profondeur=None, forme=None, nom_voie=None):
+            id_itv = clean_text(raw_itv)
+            if id_itv is None:
+                return
+            key = norm(id_itv)
+            if key is None:
+                return
+
+            id_sig = resolve_id_sig(raw_itv, raw_current, self._reg_correspondance_map, reg_sig_by_norm)
+            p_value = clean_text(profondeur)
+            p_float = parse_float(p_value)
+
+            existing = reg_rows.get(key)
+            if existing is None:
+                reg_rows[key] = {
+                    "id_itv": id_itv,
+                    "id_regard": id_itv,
+                    "profondeur": p_value,
+                    "_profondeur_float": p_float,
+                    "dimension": None,
+                    "forme": clean_text(forme),
+                    "nom_voie": clean_text(nom_voie),
+                    "id_sig": id_sig,
+                }
+                return
+
+            if existing.get("id_sig") is None and id_sig is not None:
+                existing["id_sig"] = id_sig
+
+            if existing.get("nom_voie") is None and clean_text(nom_voie) is not None:
+                existing["nom_voie"] = clean_text(nom_voie)
+
+            if existing.get("forme") is None and clean_text(forme) is not None:
+                existing["forme"] = clean_text(forme)
+
+            old_float = existing.get("_profondeur_float")
+            if p_float is not None and (old_float is None or p_float > old_float):
+                existing["profondeur"] = p_value
+                existing["_profondeur_float"] = p_float
+            elif existing.get("profondeur") is None and p_value is not None:
+                existing["profondeur"] = p_value
+
+        def upsert_coll(raw_itv, raw_current, meta):
+            id_itv = clean_text(raw_itv)
+            if id_itv is None:
+                return
+            key = norm(id_itv)
+            if key is None:
+                return
+
+            id_sig = resolve_id_sig(raw_itv, raw_current, self._coll_correspondance_map, coll_sig_by_norm)
+            length_sig = None
+            for candidate in (id_sig, raw_current, raw_itv):
+                candidate_key = norm(candidate)
+                if candidate_key is None:
+                    continue
+                length_sig = coll_length_by_norm.get(candidate_key)
+                if length_sig is not None:
+                    break
+
+            existing = coll_rows.get(key)
+            if existing is None:
+                coll_rows[key] = {
+                    "id_itv": id_itv,
+                    "id_troncon": id_itv,
+                    "type_res": None,
+                    "type_mat": map_type_mat(meta.get("ACD")),
+                    "diam_nom": parse_float(meta.get("ACB")) if clean_text(meta.get("ACC")) is None else None,
+                    "hauteur": parse_float(meta.get("ACB")) if clean_text(meta.get("ACC")) is not None else None,
+                    "largeur": clean_text(meta.get("ACC")),
+                    "forme": map_forme_coll(meta.get("ACA")),
+                    "nom_voie": clean_text(meta.get("AAJ")),
+                    "longueur_troncon_itv": parse_float(meta.get("ABQ")),
+                    "longueur_troncon_sig": length_sig,
+                    "id_sig": id_sig,
+                }
+                return
+
+            if existing.get("id_sig") is None and id_sig is not None:
+                existing["id_sig"] = id_sig
+
+            nom_voie = clean_text(meta.get("AAJ"))
+            if existing.get("nom_voie") is None and nom_voie is not None:
+                existing["nom_voie"] = nom_voie
+
+            largeur = clean_text(meta.get("ACC"))
+            if existing.get("largeur") is None and largeur is not None:
+                existing["largeur"] = largeur
+
+            if existing.get("longueur_troncon_itv") is None:
+                maybe_len = parse_float(meta.get("ABQ"))
+                if maybe_len is not None:
+                    existing["longueur_troncon_itv"] = maybe_len
+
+            if existing.get("longueur_troncon_sig") is None and length_sig is not None:
+                existing["longueur_troncon_sig"] = length_sig
+
+        for detail in details:
+            b_rows = getattr(detail, "b_rows", None) or []
+            meta = {
+                "AAJ": first_non_empty(getattr(row, "AAJ", None) for row in b_rows),
+                "ABQ": first_non_empty(getattr(row, "ABQ", None) for row in b_rows),
+                "ACA": first_non_empty(getattr(row, "ACA", None) for row in b_rows),
+                "ACB": first_non_empty(getattr(row, "ACB", None) for row in b_rows),
+                "ACC": first_non_empty(getattr(row, "ACC", None) for row in b_rows),
+                "ACD": first_non_empty(getattr(row, "ACD", None) for row in b_rows),
+                "ACH": first_non_empty(getattr(row, "ACH", None) for row in b_rows),
+                "ACI": first_non_empty(getattr(row, "ACI", None) for row in b_rows),
+            }
+
+            for attr_name in ("id_reg_ent", "id_reg_sor"):
+                raw_current = getattr(detail, attr_name, None)
+                raw_itv = getattr(detail, f"_{attr_name}_itv", raw_current)
+                upsert_reg(
+                    raw_itv=raw_itv,
+                    raw_current=raw_current,
+                    profondeur=meta.get("ACH") if attr_name == "id_reg_ent" else meta.get("ACI"),
+                    forme=None,
+                    nom_voie=meta.get("AAJ"),
+                )
+
+            raw_current_coll = getattr(detail, "id_troncon", None)
+            raw_itv_coll = getattr(detail, "_id_troncon_itv", raw_current_coll)
+            upsert_coll(raw_itv=raw_itv_coll, raw_current=raw_current_coll, meta=meta)
+
+            for defect in (getattr(detail, "defauts", None) or []):
+                for attr_name in ("id_reg_ent", "id_reg_sor"):
+                    raw_current = getattr(defect, attr_name, None)
+                    raw_itv = getattr(defect, f"_{attr_name}_itv", raw_current)
+                    upsert_reg(
+                        raw_itv=raw_itv,
+                        raw_current=raw_current,
+                        profondeur=meta.get("ACH") if attr_name == "id_reg_ent" else meta.get("ACI"),
+                        forme=None,
+                        nom_voie=meta.get("AAJ"),
+                    )
+
+                raw_current_coll = getattr(defect, "id_troncon", None)
+                raw_itv_coll = getattr(defect, "_id_troncon_itv", raw_current_coll)
+                upsert_coll(raw_itv=raw_itv_coll, raw_current=raw_current_coll, meta=meta)
+
+        missing_regards = sorted(
+            row["id_itv"] for row in reg_rows.values() if row.get("id_sig") is None
+        )
+        if missing_regards:
+            self.log_info(
+                "Correspondance SIG introuvable pour le(s) regard(s) ITV : "
+                + ", ".join(missing_regards),
+                level="error",
+            )
+
+        if layer_collecteur is not None and layer_collecteur.isValid():
+            missing_collecteurs = sorted(
+                row["id_itv"] for row in coll_rows.values() if row.get("id_sig") is None
+            )
+            if missing_collecteurs:
+                self.log_info(
+                    "Correspondance SIG introuvable pour le(s) collecteur(s) ITV : "
+                    + ", ".join(missing_collecteurs),
+                    level="error",
+                )
+
+            for row in sorted(coll_rows.values(), key=lambda value: value["id_itv"]):
+                length_itv = row.get("longueur_troncon_itv")
+                length_sig = row.get("longueur_troncon_sig")
+                if length_itv is None or length_sig is None:
+                    continue
+                delta = abs(length_sig - length_itv)
+                if delta > 2.0:
+                    self.log_info(
+                        f"Écart de longueur supérieur à 2 m pour le collecteur "
+                        f"ITV {row['id_itv']} : SIG={length_sig:.2f} m, "
+                        f"ITV={length_itv:.2f} m, delta={delta:.2f} m.",
+                        level="warning",
+                    )
+
+        self._remove_layers_by_names(["itv_ids_reg", "itv_ids_coll", "ids_reg", "ids_coll"])
+
+        layer_ids_reg = QgsVectorLayer("None", "itv_ids_reg", "memory")
+        provider_reg = layer_ids_reg.dataProvider()
+        provider_reg.addAttributes([
+            QgsField("gid", QVariant.Int),
+            QgsField("id_itv", QVariant.String),
+            QgsField("id_sig", QVariant.String),
+            QgsField("profondeur", QVariant.String),
+            QgsField("dimension", QVariant.String),
+            QgsField("forme", QVariant.String),
+            QgsField("nom_voie", QVariant.String),
+        ])
+        layer_ids_reg.updateFields()
+
+        reg_features = []
+        for idx, key in enumerate(sorted(reg_rows.keys()), 1):
+            row = reg_rows[key]
+            feature = QgsFeature(layer_ids_reg.fields())
+            feature.setAttributes([
+                idx,
+                row.get("id_itv"),
+                row.get("id_sig"),
+                row.get("profondeur"),
+                row.get("dimension"),
+                row.get("forme"),
+                row.get("nom_voie"),
+            ])
+            reg_features.append(feature)
+        if reg_features:
+            provider_reg.addFeatures(reg_features)
+        layer_ids_reg.updateExtents()
+
+        layer_ids_coll = QgsVectorLayer("None", "itv_ids_coll", "memory")
+        provider_coll = layer_ids_coll.dataProvider()
+        provider_coll.addAttributes([
+            QgsField("gid", QVariant.Int),
+            QgsField("id_itv", QVariant.String),
+            QgsField("id_sig", QVariant.String),
+            QgsField("type_res", QVariant.String),
+            QgsField("type_mat", QVariant.String),
+            QgsField("diam_nom", QVariant.Double),
+            QgsField("hauteur", QVariant.Double),
+            QgsField("largeur", QVariant.String),
+            QgsField("forme", QVariant.String),
+            QgsField("nom_voie", QVariant.String),
+            QgsField("longueur_troncon_itv", QVariant.Double),
+            QgsField("longueur_troncon_sig", QVariant.Double),
+        ])
+        layer_ids_coll.updateFields()
+
+        coll_features = []
+        for idx, key in enumerate(sorted(coll_rows.keys()), 1):
+            row = coll_rows[key]
+            feature = QgsFeature(layer_ids_coll.fields())
+            feature.setAttributes([
+                idx,
+                row.get("id_itv"),
+                row.get("id_sig"),
+                row.get("type_res"),
+                row.get("type_mat"),
+                row.get("diam_nom"),
+                row.get("hauteur"),
+                row.get("largeur"),
+                row.get("forme"),
+                row.get("nom_voie"),
+                row.get("longueur_troncon_itv"),
+                row.get("longueur_troncon_sig"),
+            ])
+            coll_features.append(feature)
+        if coll_features:
+            provider_coll.addFeatures(coll_features)
+        layer_ids_coll.updateExtents()
+
+        QgsProject.instance().addMapLayer(layer_ids_reg)
+        QgsProject.instance().addMapLayer(layer_ids_coll)
+
+        self.log_info(
+            f"Tables mémoire itv_ids_reg ({len(reg_features)} lignes) et itv_ids_coll ({len(coll_features)} lignes) ajoutées."
+        )
+
+    def get_connection_params(self, connexion_name):
+        """Récupère les paramètres de connexion PostgreSQL à partir du nom de la connexion."""
+        settings = QgsSettings()
+        prefix = f"PostgreSQL/connections/{connexion_name}/"
+        return {
+            "dbname": settings.value(prefix + "database", ""),
+            "user": settings.value(prefix + "username", ""),
+            "password": settings.value(prefix + "password", ""),
+            "host": settings.value(prefix + "host", "localhost"),
+            "port": settings.value(prefix + "port", "5432"),
+        }
+
+    def test_connexion(self):
+        """Vérifie la connexion et les objets requis par le mode DB legacy."""
+        connexion = self.cmbConnexionBDD.currentText()
+        if not connexion:
+            QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune connexion sélectionnée.")
+            return
+
+        connection_params = self.get_connection_params(connexion)
+
+        try:
+            conn = psycopg2.connect(
+                dbname=connection_params["dbname"],
+                user=connection_params["user"],
+                password=connection_params["password"],
+                host=connection_params["host"],
+                port=connection_params["port"]
+            )
+            required_tables = {
+                "B01", "B02", "B03", "B04", "C", "code_obs", "commune",
+                "ids_coll", "ids_reg", "inspection", "passage",
+            }
+            required_views = {
+                "v_inspection", "v_itv_details", "v_itv_details_bcht",
+                "v_itv_details_bcht_lines", "v_itv_details_geom",
+                "v_itv_physiq_coll", "v_itv_physiq_reg",
+            }
+            required_functions = {
+                "get_all_bcht_lines", "get_all_bcht_positions",
+                "get_all_defect_positions", "get_all_inspection_data",
+                "get_bcht_lines", "get_bcht_positions", "get_defect_positions",
+                "get_id_sig", "get_inspection_data", "get_longueur_troncon_sig",
+                "set_id_sig",
+            }
+
+            cursor = conn.cursor()
+            cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'postgis')")
+            postgis_installed = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'itv'"
+            )
+            available_tables = {row[0] for row in cursor.fetchall()}
+            cursor.execute(
+                "SELECT viewname FROM pg_views WHERE schemaname = 'itv'"
+            )
+            available_views = {row[0] for row in cursor.fetchall()}
+            cursor.execute("""
+                SELECT proname
+                FROM pg_proc
+                JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace
+                WHERE nspname = 'itv'
+            """)
+            available_functions = {row[0] for row in cursor.fetchall()}
+            cursor.close()
+
+            issues = []
+            if not postgis_installed:
+                issues.append("extension PostGIS absente")
+            missing_tables = sorted(required_tables - available_tables)
+            missing_views = sorted(required_views - available_views)
+            missing_functions = sorted(required_functions - available_functions)
+            if missing_tables:
+                issues.append("tables manquantes : " + ", ".join(missing_tables))
+            if missing_views:
+                issues.append("vues manquantes : " + ", ".join(missing_views))
+            if missing_functions:
+                issues.append("fonctions manquantes : " + ", ".join(missing_functions))
+
+            if issues:
+                message = (
+                    "Connexion réussie, mais le mode DB GeoITV n'est pas prêt :\n\n- "
+                    + "\n- ".join(issues)
+                    + "\n\nExécutez resources/create_schema_itv.sql sur cette base."
+                )
+                self.log_info(message, level="error")
+                QtWidgets.QMessageBox.warning(self, "Schéma GeoITV incomplet", message)
+            else:
+                message = (
+                    f"Connexion et schéma GeoITV validés pour la base "
+                    f"'{connection_params['dbname']}' sur "
+                    f"{connection_params['host']}:{connection_params['port']}."
+                )
+                self.log_info(message)
+                QtWidgets.QMessageBox.information(self, "Succès", message)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur de connexion", f"Impossible de se connecter à la base de données : {str(e)}")
+        finally:
+            if 'conn' in locals() and conn:
+                conn.close()
+
+    def clear_tables(self, conn):
+        """Vide l'historique ITV et supprime les tables temporaires importées."""
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            schema = self.db_schema()
+            # Truncate la table inspection (et tout ce qui dépend d'elle)
+            try:
+                cursor.execute(
+                    sql.SQL("TRUNCATE TABLE {}.inspection CASCADE;").format(sql.Identifier(schema))
+                )
+            except Exception as e:
+                self.log_exception("Impossible de vider la table inspection", e)
+                raise
+
+            cursor.execute(
+                sql.SQL("""
+                    DO $$
+                    DECLARE
+                        temporary_table text;
+                    BEGIN
+                        FOR temporary_table IN
+                            SELECT tablename
+                            FROM pg_tables
+                            WHERE schemaname = {schema}
+                              AND (
+                                  tablename LIKE 'table_collecteur_%'
+                                  OR tablename LIKE 'table_regard_%'
+                              )
+                        LOOP
+                            EXECUTE format(
+                                'DROP TABLE IF EXISTS %I.%I CASCADE',
+                                {schema},
+                                temporary_table
+                            );
+                        END LOOP;
+                    END $$;
+                """).format(schema=sql.Literal(schema))
+            )
+            conn.commit()
+            self.log_info("Les tables temporaires ont été supprimées et la table inspection a été vidée.")
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            self.log_exception("Erreur lors de la suppression des tables", e)
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de la suppression des tables : {e}")
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+
+    def import_layer_regard(self, connection_params):
+        """
+        Importe la couche sélectionnée dans mapLayerComboBox_regard dans la base PostgreSQL.
+        """
+        dbname = connection_params["dbname"]
+        user = connection_params["user"]
+        password = connection_params["password"]
+        host = connection_params["host"]
+        port = connection_params["port"]
+
+        # 1. Récupérer la couche sélectionnée
+        layer = self.mapLayerComboBox_regard.currentLayer()
+        if not layer:
+            QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune couche regard sélectionnée.")
+            return
+
+        # 2. Définir le nom de la table cible
+        formatted_table_name = f"table_regard_{layer.name().replace(' ', '_').replace('-', '_').lower()}"
+        if len(formatted_table_name) > 60:
+            formatted_table_name = formatted_table_name[:60]
+
+        # 3. Nettoyer les champs texte pour garantir l'encodage UTF-8 strict (remplacement des caractères non-ASCII)
+        import re
+        layer.startEditing()
+        for feature in layer.getFeatures():
+            attrs = feature.attributes()
+            for idx, field in enumerate(layer.fields()):
+                val = attrs[idx]
+                if field.typeName().lower() in ['string', 'text'] and val is not None:
+                    try:
+                        if isinstance(val, bytes):
+                            val_str = val.decode('utf-8', errors='replace')
+                        else:
+                            val_str = str(val)
+                        # Remplacer tout caractère non-ASCII par un espace
+                        val_clean = re.sub(r'[^\x20-\x7E]', ' ', val_str)
+                        val_clean = self._null_if_blank(val_clean)
+                        if val != val_clean:
+                            layer.changeAttributeValue(feature.id(), idx, val_clean)
+                    except Exception:
+                        layer.changeAttributeValue(feature.id(), idx, None)
+        layer.commitChanges()
+
+        # 4. Ecrire la couche temporaire dans PostgreSQL
+        uri = f"PG:host={host} port={port} dbname={dbname} user={user} password={password}"
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "PostgreSQL"
+        options.layerName = formatted_table_name
+        options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
+        schema = self.db_schema()
+        options.layerOptions = [
+            "GEOMETRY_NAME=geom",
+            f"SCHEMA={schema}",
+            "OVERWRITE=YES",
+            "precision=NO"
+        ]
+
+        try:
+            error, error_string = QgsVectorFileWriter.writeAsVectorFormatV2(
+                layer,
+                uri,
+                QgsProject.instance().transformContext(),
+                options
+            )
+            if error == QgsVectorFileWriter.NoError:
+                self.log_info(f"Couche 'regard' importée dans {schema}.{formatted_table_name}")
+            else:
+                QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'import : {error_string}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors de l'export : {str(e)}")
+    
+    def import_layer_collecteur(self, connection_params):
+        """
+        Importe la couche sélectionnée dans mapLayerComboBox_collecteur dans la base PostgreSQL.
+        """
+        dbname = connection_params["dbname"]
+        user = connection_params["user"]
+        password = connection_params["password"]
+        host = connection_params["host"]
+        port = connection_params["port"]
+
+        # 1. Récupérer la couche sélectionnée
+        layer = self.mapLayerComboBox_collecteur.currentLayer()
+        if not layer:
+            self.log_info("Aucune couche collecteur sélectionnée.")
+            return
+
+        # 2. Définir le nom de la table cible
+        formatted_table_name = f"table_collecteur_{layer.name().replace(' ', '_').replace('-', '_').lower()}"
+        if len(formatted_table_name) > 60:
+            formatted_table_name = formatted_table_name[:60]
+
+        # 3. Nettoyer les champs texte pour garantir l'encodage UTF-8 strict (remplacement des caractères non-ASCII)
+        import re
+        layer.startEditing()
+        for feature in layer.getFeatures():
+            attrs = feature.attributes()
+            for idx, field in enumerate(layer.fields()):
+                val = attrs[idx]
+                if field.typeName().lower() in ['string', 'text'] and val is not None:
+                    try:
+                        if isinstance(val, bytes):
+                            val_str = val.decode('utf-8', errors='replace')
+                        else:
+                            val_str = str(val)
+                        # Remplacer tout caractère non-ASCII par un espace
+                        val_clean = re.sub(r'[^\x20-\x7E]', ' ', val_str)
+                        val_clean = self._null_if_blank(val_clean)
+                        if val != val_clean:
+                            layer.changeAttributeValue(feature.id(), idx, val_clean)
+                    except Exception:
+                        layer.changeAttributeValue(feature.id(), idx, None)
+        layer.commitChanges()
+
+        # 4. Ecrire la couche temporaire dans PostgreSQL
+        uri = f"PG:host={host} port={port} dbname={dbname} user={user} password={password}"
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "PostgreSQL"
+        options.layerName = formatted_table_name
+        options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
+        schema = self.db_schema()
+        options.layerOptions = [
+            "GEOMETRY_NAME=geom",
+            f"SCHEMA={schema}",
+            "OVERWRITE=YES",
+            "precision=NO"
+        ]
+
+        try:
+            error, error_string = QgsVectorFileWriter.writeAsVectorFormatV2(
+                layer,
+                uri,
+                QgsProject.instance().transformContext(),
+                options
+            )
+            if error == QgsVectorFileWriter.NoError:
+                self.log_info(f"Couche 'collecteur'importée dans {schema}.{formatted_table_name}")
+            else:
+                QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'import : {error_string}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors de l'export : {str(e)}")
+
+    def insert_metadata(self, conn, file_path, metadata):
+        """
+        Insère les métadonnées dans la table `itv.inspection` en utilisant la connexion configurée et les nouveaux widgets.
+        """
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            schema = self.db_schema()
+            # Requête SQL pour insérer les métadonnées
+            query = sql.SQL("""
+                INSERT INTO {}.inspection (
+                    gid, file, "A1", "A2", "A3", "A4", "A5", "A6", shp_reg, shp_coll,
+                    entreprise, pdf_filename, shp_reg_table, shp_coll_table, shp_reg_id_fieldname, shp_coll_id_fieldname, created_by
+                ) VALUES (DEFAULT, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING gid;
+            """).format(sql.Identifier(schema))
+
+            # Récupérer les noms des couches sélectionnées (collecteur et regard)
+            layer_collecteur = self.mapLayerComboBox_collecteur.currentLayer() if hasattr(self, 'mapLayerComboBox_collecteur') else None
+            layer_regard = self.mapLayerComboBox_regard.currentLayer() if hasattr(self, 'mapLayerComboBox_regard') else None
+            shp_coll = layer_collecteur.name() if layer_collecteur else None
+            shp_reg = layer_regard.name() if layer_regard else None
+
+            # Nom de la table regard (optionnelle)
+            if layer_regard:
+                table_name_reg = layer_regard.name()
+                shp_reg_table = f"table_regard_{table_name_reg}".replace(" ", "_").replace("-", "_").lower()
+                if len(shp_reg_table) > 60:
+                    shp_reg_table = shp_reg_table[:60]
+            else:
+                shp_reg_table = None
+
+            # Nom de la table collecteur (optionnelle)
+            if layer_collecteur:
+                table_name_coll = layer_collecteur.name()
+                shp_coll_table = f"table_collecteur_{table_name_coll}".replace(" ", "_").replace("-", "_").lower()
+                if len(shp_coll_table) > 60:
+                    shp_coll_table = shp_coll_table[:60]
+            else:
+                shp_coll_table = None
+
+            # PDF et entreprise
+            pdf_filename = (
+                self.lineEdit_rapport.text().strip() or None
+                if hasattr(self, 'lineEdit_rapport') else None
+            )
+            enterprise_name = (
+                self.lineEdit_entreprise.text().strip() or None
+                if hasattr(self, 'lineEdit_entreprise') else None
+            )
+
+            # Champs de jointure
+            shp_reg_id_fieldname = self.fieldComboBox_regard.currentText() if hasattr(self, 'fieldComboBox_regard') and self.fieldComboBox_regard.currentIndex() != -1 else None
+            shp_coll_id_fieldname = self.fieldComboBox_collecteur.currentText() if hasattr(self, 'fieldComboBox_collecteur') and self.fieldComboBox_collecteur.currentIndex() != -1 else None
+            
+            # Préparation des valeurs à insérer
+            values = tuple(self._null_if_blank(value) for value in (
+                file_path,  # Nom du fichier
+                metadata.get("charset"),  # A1
+                metadata.get("language"),  # A2
+                metadata.get("delimiter"),  # A3
+                metadata.get("decimalSeparator"),  # A4
+                metadata.get("quoteChar"),  # A5
+                metadata.get("version"),  # A6
+                shp_reg,  # Nom de la couche regard
+                shp_coll,  # Nom de la couche collecteur
+                enterprise_name,  # Nom de l'entreprise
+                pdf_filename,  # Nom du fichier PDF
+                shp_reg_table,  # Nom de la table shp_reg
+                shp_coll_table,  # Nom de la table shp_coll
+                shp_reg_id_fieldname,  # Champ jointure regard
+                shp_coll_id_fieldname,  # Champ jointure collecteur
+                1
+            ))
+
+            # Exécution de la requête
+            cursor.execute(query, values)
+            inspection_gid = cursor.fetchone()[0]  # Récupère l'ID généré
+
+            # Validation des changements
+            conn.commit()
+            self.log_info(f"Métadonnées insérées avec succès dans la table `inspection` avec gid={inspection_gid}.")
+
+            return inspection_gid
+
+        except psycopg2.OperationalError as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur de connexion", f"Erreur de connexion : {str(e)}")
+        except psycopg2.Error as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur SQL", f"Erreur SQL : {str(e)}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur inattendue", f"Erreur inattendue : {str(e)}")
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+        return None
+
+    def insert_data(self, conn, inspection_gid, passages):
+        """
+        Insère les passages dans la table `itv.passage` pour une inspection donnée, ainsi que les tables associées, en utilisant la connexion configurée.
+        Affiche le numéro de passage dans le log.
+        """
+        cursor = None
+        total = len(passages)
+
+        try:
+            cursor = conn.cursor()
+            schema = self.db_schema()
+            query = sql.SQL("""
+                INSERT INTO {}.passage (
+                    gid, n_passage, inspection_gid
+                ) VALUES (DEFAULT, %s, %s)
+                RETURNING gid;
+            """).format(sql.Identifier(schema))
+
+            self.log_info(
+                f"Insertion SQL des passages: {total} passage(s) à traiter.",
+                level="debug"
+            )
+
+            for idx, passage in enumerate(passages, 1):
+                n_passage = passage.get("n_passage")
+                self.log_info(f"Insertion du passage n°{n_passage} ({idx}/{total}).", level="debug")
+                cursor.execute(query, (n_passage, inspection_gid))
+                passage_gid = cursor.fetchone()[0]
+
+                tables = passage.get("tables", {}) if isinstance(passage, dict) else {}
+                if isinstance(tables, dict):
+                    table_names = sorted(tables.keys())
+                    self.log_info(
+                        f"Passage n°{n_passage} -> gid={passage_gid}, tables={table_names}",
+                        level="debug"
+                    )
+                    for table_name in table_names:
+                        self.log_info(
+                            f"  - {table_name}: {self._safe_len(tables.get(table_name))} ligne(s)",
+                            level="debug"
+                        )
+
+                # Insérer les données des tables associées au passage si elles existent
+                if "tables" in passage:
+                    if "#B01" in passage["tables"]:
+                        b01_data = passage["tables"]["#B01"]
+                        insert_b01_table(self, cursor, passage_gid, b01_data)
+                    if "#B02" in passage["tables"]:
+                        b02_data = passage["tables"]["#B02"]
+                        insert_b02_table(self, cursor, passage_gid, b02_data)
+                    if "#B03" in passage["tables"]:
+                        b03_data = passage["tables"]["#B03"]
+                        insert_b03_table(self, cursor, passage_gid, b03_data)
+                    if "#B04" in passage["tables"]:
+                        b04_data = passage["tables"]["#B04"]
+                        insert_b04_table(self, cursor, passage_gid, b04_data)
+                    if "#C" in passage["tables"]:
+                        c_data = passage["tables"]["#C"]
+                        insert_c_table(self, cursor, passage_gid, c_data)
+
+            conn.commit()
+            self.log_info("Passages insérés avec succès dans la table `passage` et les tables associées.")
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'insertion des passages : {str(e)}")
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+    def import_txt_data(self, conn=None, persist_to_db=True):
+        """
+        Charge les données extraites du fichier TXT.
+
+        - persist_to_db=True: insère aussi les données en base (mode legacy SQL)
+        - persist_to_db=False: parse uniquement le TXT (mode full Python)
+
+        Retourne TOUJOURS (inspection_gid, details), même en cas d'erreur.
+        """
+        file_path = self.inputFileTXT.filePath()
+        if not file_path:
+            QtWidgets.QMessageBox.critical(self, "Erreur", "Veuillez sélectionner un fichier TXT avant de continuer.")
+            return None, [] 
+
+        self.current_txt_file = file_path
+
+        inspection_gid = None
+        details = []  
+
+        try:
+            parser = FileParser()
+            parsed_data = parser.parse(file_path)
+
+            metadata = parsed_data.get("metadata", {})
+            passages = parsed_data.get("passages", [])
+            details = parsed_data.get("details", [])
+
+            self._log_debug_passages(metadata, passages, details, file_path)
+
+            self.inspection_metadata = self._build_full_python_inspection_metadata(file_path, details)
+
+            self.log_info(
+                "Métadonnées inspection (pré-calcul FullPython): "
+                f"date_deb={self.inspection_metadata.get('date_deb')}, "
+                f"date_fin={self.inspection_metadata.get('date_fin')}, "
+                f"longueur={self.inspection_metadata.get('longueur')}",
+                level="debug"
+            )
+
+            if persist_to_db:
+                if conn is None:
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Erreur",
+                        "Connexion base absente: impossible d'importer en mode SQL."
+                    )
+                    return None, []
+
+                inspection_gid = self.insert_metadata(conn, file_path, metadata)
+                if inspection_gid:
+                    self.log_info(f"Inspection créée en base: gid={inspection_gid}", level="debug")
+                    self.insert_data(conn, inspection_gid, passages)
+                    for detail in details:
+                        detail.inspection_gid = inspection_gid
+                        for defect in getattr(detail, "defauts", None) or []:
+                            defect.inspection_gid = inspection_gid
+                    self.log_info("Processus d'importation en base terminé avec succès.")
+                else:
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Erreur",
+                        "Erreur lors de l'insertion des métadonnées. Processus interrompu."
+                    )
+                    details = []
+            else:
+                inspection_gid = self._next_local_inspection_gid()
+                self.log_info(f"Inspection locale créée (FullPython): gid={inspection_gid}", level="debug")
+                for detail in details:
+                    detail.inspection_gid = inspection_gid
+                    for defect in getattr(detail, "defauts", None) or []:
+                        defect.inspection_gid = inspection_gid
+                self.log_info(
+                    f"Fichier TXT analysé en mode full Python : {len(details)} détail(s) chargés."
+                )
+
+        except Exception as e:
+            self.log_exception("Erreur lors de l'importation des données", e)
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Erreur",
+                f"Erreur lors de l'importation des données : {str(e)}"
+            )
+            details = []  
+
+        return inspection_gid, details  
+    
+    def set_id_sig(self, conn, inspection_gid):
+        """
+        Exécute la fonction SQL `itv.set_id_sig` sur la base de données et affiche un message de succès.
+        """
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            schema = self.db_schema()
+            query = sql.SQL("SELECT {}.set_id_sig(%s)").format(sql.Identifier(schema))
+            cursor.execute(query, (inspection_gid,))
+            conn.commit()
+            self.log_info("Mise à jour des correspondances effectuée avec succès.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de l'exécution de la fonction SQL : {str(e)}")
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+    
+    def update_ids_reg_from_csv(self, conn, inspection_gid):
+        """
+        Met à jour la colonne id_sig dans itv.ids_reg à partir d'un CSV si fichier de correspondance regard fourni.
+        """
+        csv_path = self.inputFileCSV_regard.filePath()
+        if not csv_path or not os.path.exists(csv_path):
+            self.log_info("Aucun fichier CSV de correspondance regard accessible. Opération ignorée.")
+            return []
+
+        cursor = None
+        try:
+            schema = self.db_schema()
+            correspondance_data = {}
+
+            with open(csv_path, "r", encoding="utf-8-sig") as f:
+                first_line = f.readline()
+
+                if "\t" in first_line and "," not in first_line and ";" not in first_line:
+                    sep = "\t"
+                elif ";" in first_line and "," not in first_line:
+                    sep = ";"
+                else:
+                    sep = ","
+
+                headers = [h.strip() for h in first_line.strip().split(sep)]
+
+                if "id_itv" not in headers or "id_sig" not in headers:
+                    raise ValueError("Le CSV doit contenir les colonnes 'id_itv' et 'id_sig'.")
+
+                id_itv_index = headers.index("id_itv")
+                id_sig_index = headers.index("id_sig")
+
+                for line in f:
+                    if not line.strip():
+                        continue
+
+                    values = [v.strip() for v in line.strip().split(sep)]
+                    if len(values) <= max(id_itv_index, id_sig_index):
+                        continue
+
+                    id_itv = values[id_itv_index].strip('"')
+                    id_sig = values[id_sig_index].strip('"')
+
+                    if id_itv and id_sig:
+                        correspondance_data[id_itv] = id_sig
+
+            cursor = conn.cursor()
+
+            for id_itv, id_sig in correspondance_data.items():
+                update_query = sql.SQL("""
+                    UPDATE {}.ids_reg
+                    SET id_sig = %s
+                    WHERE inspection_gid = %s
+                    AND id_itv = %s
+                """).format(sql.Identifier(schema))
+                cursor.execute(update_query, (id_sig, inspection_gid, id_itv))
+
+            conn.commit()
+            self.log_info(f"Correspondances regard mises à jour avec succès ({len(correspondance_data)} lignes).")
+            return correspondance_data
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Erreur",
+                f"Erreur lors de la mise à jour de la table itv.ids_reg : {str(e)}"
+            )
+            return []
+
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass    
+                
+    def update_ids_coll_from_csv(self, conn, inspection_gid):
+        """
+        Met à jour la colonne id_sig dans itv.ids_coll à partir d'un CSV si fichier de correspondance collecteur fourni.
+        """
+        csv_path = self.inputFileCSV_collecteur.filePath()
+        if not csv_path or not os.path.exists(csv_path):
+            self.log_info("Aucun fichier CSV de correspondance collecteur accessible. Opération ignorée.")
+            return
+
+        cursor = None
+        try:
+            schema = self.db_schema()
+            correspondance_data = {}
+            with open(csv_path, "r", encoding="utf-8") as f:
+                first_line = f.readline()
+                if "\t" in first_line and "," not in first_line and ";" not in first_line:
+                    sep = "\t"
+                elif ";" in first_line and "," not in first_line:
+                    sep = ";"
+                else:
+                    sep = ","
+                headers = [h.strip() for h in first_line.strip().split(sep)]
+
+                id_troncon_col = "id_troncon" if "id_troncon" in headers else ("id_itv" if "id_itv" in headers else None)
+                if not id_troncon_col or "id_sig" not in headers:
+                    QtWidgets.QMessageBox.critical(self, "Erreur", "Le CSV doit contenir 'id_troncon' ou 'id_itv' et 'id_sig'.")
+                    return
+
+                id_troncon_index = headers.index(id_troncon_col)
+                id_sig_index = headers.index("id_sig")
+
+                for line in f:
+                    if not line.strip():
+                        continue
+                    values = [v.strip() for v in line.strip().split(sep)]
+                    if len(values) <= max(id_troncon_index, id_sig_index):
+                        continue
+                    id_troncon = values[id_troncon_index]
+                    id_sig = values[id_sig_index] if id_sig_index < len(values) else None
+                    if id_troncon and id_sig:
+                        correspondance_data[id_troncon] = id_sig
+
+            cursor = conn.cursor()
+
+            for id_troncon, id_sig in correspondance_data.items():
+                update_query = sql.SQL("""
+                    UPDATE {}.ids_coll
+                    SET id_sig = %s
+                    WHERE id_sig IS NULL AND inspection_gid = %s AND id_itv = %s
+                """).format(sql.Identifier(schema))
+                cursor.execute(update_query, (id_sig, inspection_gid, id_troncon))
+            conn.commit()
+            self.log_info("Correspondances collecteur mises à jour avec succès.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de la mise à jour de la table itv.ids_coll : {str(e)}")
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+                
+    def display_v_inspection_view(self, connection_params, inspection_gid):
+        """
+        Affiche dans QGIS la vue SQL `itv.v_inspection` pour une inspection donnée et zoome sur l'emprise de la couche.
+        """
+        try:
+
+            dbname = connection_params["dbname"]
+            user = connection_params["user"]
+            password = connection_params["password"]
+            host = connection_params["host"]
+            port = connection_params["port"]
+            schema = self.db_schema()
+
+            query = f"(SELECT * FROM {schema}.v_inspection WHERE inspection_gid = {inspection_gid})"
+            geom_column = "geom"
+            primary_key = "inspection_gid"
+
+            uri = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"key='{primary_key}' type=Polygon table=\"({query})\" ({geom_column})"
+            )
+
+            layer_name = f"itv_inspection-{inspection_gid}"
+            layer = QgsVectorLayer(uri, layer_name, "postgres")
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+                # Appliquer un style QML natif PyQGIS si le fichier existe
+                try:
+                    qml_path = os.path.join(os.path.dirname(__file__), 'styles', 'itv_inspection.qml')
+                    if os.path.exists(qml_path):
+                        layer.loadNamedStyle(qml_path)
+                        layer.triggerRepaint()
+                except Exception as e:
+                    self.log_info(f"Impossible d'appliquer le style QML : {e}")
+                # Zoom sur l'emprise
+                iface = self.iface if hasattr(self, 'iface') else None
+                if iface:
+                    canvas = iface.mapCanvas()
+                    canvas.setExtent(layer.extent())
+                    canvas.refresh()
+            else:
+                QtWidgets.QMessageBox.critical(self, "Erreur", f"Impossible de charger la vue '{schema}.v_inspection' pour l'inspection {inspection_gid} dans QGIS.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors de l'affichage de la vue : {str(e)}")
+
+    def display_v_itv_details_geom_view(self, connection_params, inspection_gid):
+        """
+        Affiche dans QGIS la vue SQL `itv.v_itv_details_geom` pour une inspection donnée.
+        """
+        try:
+
+            dbname = connection_params["dbname"]
+            user = connection_params["user"]
+            password = connection_params["password"]
+            host = connection_params["host"]
+            port = connection_params["port"]
+            schema = self.db_schema()
+
+            query = f"(SELECT * FROM {schema}.v_itv_details_geom WHERE inspection_gid = {inspection_gid})"
+            geom_column = "geom"
+            primary_key = "gid"
+
+            uri = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"key='{primary_key}' type=Point table=\"({query})\" ({geom_column})"
+            )
+
+            layer_name = f"itv_details-{inspection_gid}"
+            layer = QgsVectorLayer(uri, layer_name, "postgres")
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+                # Appliquer un style QML natif PyQGIS si le fichier existe
+                try:
+                    qml_path = os.path.join(os.path.dirname(__file__), 'styles', 'itv_details_geom.qml')
+                    if os.path.exists(qml_path):
+                        layer.loadNamedStyle(qml_path)
+                        layer.triggerRepaint()
+                except Exception as e:
+                    self.log_info(f"Impossible d'appliquer le style QML : {e}")
+            else:
+                QtWidgets.QMessageBox.critical(self, "Erreur", f"Impossible de charger la vue '{schema}.v_itv_details_geom' pour l'inspection {inspection_gid} dans QGIS.")
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors de l'affichage de la vue : {str(e)}")
+
+    def display_v_itv_details_bcht_view(self, connection_params, inspection_gid):
+        """
+        Affiche dans QGIS la vue SQL `itv.v_itv_details_bcht` pour une inspection donnée.
+        Importe également la vue `itv.v_itv_details_bcht_lines` si elle existe.
+        """
+        try:
+
+            dbname = connection_params["dbname"]
+            user = connection_params["user"]
+            password = connection_params["password"]
+            host = connection_params["host"]
+            port = connection_params["port"]
+            schema = self.db_schema()
+
+            # Vue points
+            query = f"(SELECT * FROM {schema}.v_itv_details_bcht WHERE inspection_gid = {inspection_gid})"
+            geom_column = "geom"
+            primary_key = "id"
+            uri = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"key='{primary_key}' type=Point table=\"({query})\" ({geom_column})"
+            )
+            layer_name = f"itv_details_bcht-{inspection_gid}"
+            layer = QgsVectorLayer(uri, layer_name, "postgres")
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+                # Appliquer un style QML natif PyQGIS si le fichier existe
+                try:
+                    qml_path = os.path.join(os.path.dirname(__file__), 'styles', 'itv_details_bcht.qml')
+                    if os.path.exists(qml_path):
+                        layer.loadNamedStyle(qml_path)
+                        layer.triggerRepaint()
+                except Exception as e:
+                    self.log_info(f"Impossible d'appliquer le style QML : {e}")
+            else:
+                QtWidgets.QMessageBox.critical(self, "Erreur", f"Impossible de charger la vue '{schema}.v_itv_details_bcht' pour l'inspection {inspection_gid} dans QGIS.")
+
+            # Vue lines (orientation)
+            sql_query_lines = f"(SELECT * FROM {schema}.v_itv_details_bcht_lines WHERE inspection_gid = {inspection_gid})"
+            geom_column_lines = "geom"
+            primary_key_lines = "id"
+            validation_conn = None
+            validation_cursor = None
+            try:
+                validation_conn = psycopg2.connect(
+                    dbname=dbname,
+                    user=user,
+                    password=password,
+                    host=host,
+                    port=port,
+                )
+                validation_cursor = validation_conn.cursor()
+                validation_cursor.execute(
+                    sql.SQL(
+                        "SELECT 1 FROM {}.v_itv_details_bcht_lines "
+                        "WHERE inspection_gid = %s LIMIT 1"
+                    ).format(sql.Identifier(schema)),
+                    (inspection_gid,),
+                )
+            except Exception as e:
+                self.log_exception(
+                    "Impossible d'exécuter la vue SQL des orientations", e
+                )
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Erreur",
+                    "La vue SQL des orientations BCA ne peut pas être exécutée. "
+                    "Consultez le journal en mode Debug pour le détail PostgreSQL.",
+                )
+                return False
+            finally:
+                if validation_cursor is not None:
+                    validation_cursor.close()
+                if validation_conn is not None:
+                    validation_conn.close()
+
+            uri_lines = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"key='{primary_key_lines}' type=LineString table=\"({sql_query_lines})\" ({geom_column_lines})"
+            )
+            layer_name_lines = f"itv_details_bcht_lines-{inspection_gid}"
+            layer_lines = QgsVectorLayer(uri_lines, layer_name_lines, "postgres")
+            if layer_lines.isValid():
+                QgsProject.instance().addMapLayer(layer_lines)
+                line_count = layer_lines.featureCount()
+                if line_count:
+                    self.log_info(
+                        f"Couche des orientations ajoutée à QGIS : {line_count} ligne(s)."
+                    )
+                else:
+                    self.log_info(
+                        "Aucune orientation BCA n'a été trouvée pour cette inspection.",
+                        level="warning",
+                    )
+                # Appliquer un style QML natif PyQGIS si le fichier existe
+                try:
+                    qml_path = os.path.join(os.path.dirname(__file__), 'styles', 'itv_details_bcht_lines.qml')
+                    if os.path.exists(qml_path):
+                        result, error_msg = layer_lines.loadNamedStyle(qml_path)
+                        layer_lines.triggerRepaint()
+                except Exception as e:
+                    self.log_info(f"Impossible d'appliquer le style QML : {e}")
+            else:
+                provider_error = layer_lines.error().summary()
+                self.log_info(
+                    f"Impossible de charger les orientations depuis "
+                    f"'{schema}.v_itv_details_bcht_lines' : {provider_error or 'erreur fournisseur inconnue'}",
+                    level="error",
+                )
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Erreur",
+                    f"Impossible de charger la vue '{schema}.v_itv_details_bcht_lines' pour "
+                    f"l'inspection {inspection_gid}."
+                )
+                return False
+
+        except Exception as e:
+            self.log_exception("Erreur lors de l'affichage des branchements BCA", e)
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors de l'affichage de la vue : {str(e)}")
+            return False
+
+        return True
+    
+    def load_ids_tables(self, connection_params, inspection_gid):
+        """
+        Charge les tables `ids_coll` et `ids_reg` dans QGIS pour une inspection donnée (sans géométrie, comme des tables CSV).
+        Affiche également les données dans les logs/messages.
+        """
+        try:
+
+            dbname = connection_params["dbname"]
+            user = connection_params["user"]
+            password = connection_params["password"]
+            host = connection_params["host"]
+            port = connection_params["port"]
+            schema = self.db_schema()
+
+            # ids_reg
+            query_reg = f"""(
+                SELECT
+                    gid,
+                    id_regard AS id_itv,
+                    id_sig,
+                    profondeur,
+                    dimension,
+                    forme,
+                    nom_voie
+                FROM {schema}.v_itv_physiq_reg
+                WHERE inspection_gid = {inspection_gid}
+            )"""
+            uri_reg = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"key='gid' type=NONE table=\"{query_reg}\""
+            )
+            layer_reg = QgsVectorLayer(uri_reg, f"itv_ids_reg - Inspection {inspection_gid}", "postgres")
+            if layer_reg.isValid() and layer_reg.featureCount() > 0:
+                QgsProject.instance().addMapLayer(layer_reg)
+                self._log_db_id_issues(layer_reg, "id_itv", "regard(s)")
+                self.log_info(f"Table '{schema}.v_itv_physiq_reg' pour l'inspection {inspection_gid} ajoutée à QGIS. ({layer_reg.featureCount()} lignes, champs: {[f.name() for f in layer_reg.fields()]})")
+            else:
+                self.log_info(f"Aucune donnée trouvée ou impossible de charger '{schema}.v_itv_physiq_reg' pour inspection_gid={inspection_gid}. (Champs: {[f.name() for f in layer_reg.fields()]})", level="debug")
+
+            # ids_coll
+            query_coll = f"""(
+                SELECT
+                    gid,
+                    id_troncon AS id_itv,
+                    id_sig,
+                    type_res,
+                    type_mat,
+                    diam_nom,
+                    hauteur,
+                    largeur,
+                    forme,
+                    nom_voie,
+                    longueur_troncon_itv,
+                    longueur_troncon_sig
+                FROM {schema}.v_itv_physiq_coll
+                WHERE inspection_gid = {inspection_gid}
+            )"""
+            uri_coll = (
+                f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
+                f"key='gid' type=NONE table=\"{query_coll}\""
+            )
+            layer_coll = QgsVectorLayer(uri_coll, f"itv_ids_coll - Inspection {inspection_gid}", "postgres")
+            if layer_coll.isValid() and layer_coll.featureCount() > 0:
+                QgsProject.instance().addMapLayer(layer_coll)
+                self._log_db_id_issues(
+                    layer_coll, "id_itv", "collecteur(s)", check_lengths=True
+                )
+                self.log_info(f"Table '{schema}.v_itv_physiq_coll' pour l'inspection {inspection_gid} ajoutée à QGIS. ({layer_coll.featureCount()} lignes, champs: {[f.name() for f in layer_coll.fields()]})")
+            else:
+                self.log_info(f"Aucune donnée trouvée ou impossible de charger '{schema}.v_itv_physiq_coll' pour inspection_gid={inspection_gid}. (Champs: {[f.name() for f in layer_coll.fields()]})", level="debug")
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors du chargement des tables : {str(e)}")
+        finally:
+            pass
+
+    def calculate_and_show_defect_positions(self):
+        """Calcule et ajoute la couche des défauts au projet à partir de `self.details`."""
+        try:
+            if not hasattr(self, 'details') or not self.details:
+                self.log_info("Aucune donnée ITV chargée (détails manquants) : pas de calcul des positions des défauts.")
+                return
+
+            layer_regard = self.mapLayerComboBox_regard.currentLayer() if hasattr(self, 'mapLayerComboBox_regard') else None
+
+            if not layer_regard:
+                self.log_info("Couche regard non sélectionnée : impossibilité de calculer les défauts.")
+                return
+
+            layer_collecteur = self.mapLayerComboBox_collecteur.currentLayer() if hasattr(self, 'mapLayerComboBox_collecteur') else None
+
+            self.log_info("Calcul des positions des défauts...")
+
+            defects_list = []
+            for detail in self.details:
+                if not hasattr(detail, 'defauts') or not detail.defauts:
+                    continue
+                for d in detail.defauts:
+                    defect = {
+                        'gid': getattr(d, 'gid', None) or 0,
+                        'code_obs': getattr(d, 'code_obs', None) or '',
+                        'libel_obs': getattr(d, 'libel_obs', None) or '',
+                        'metrage': getattr(d, 'metrage', None),
+                        'id_reg_ent': getattr(d, 'id_reg_ent', None),
+                        'id_reg_sor': getattr(d, 'id_reg_sor', None),
+                        'id_troncon': getattr(d, 'id_troncon', None),
+                        'n_passage': getattr(detail, 'n_passage', None),
+                        'sens_ecoul': getattr(d, 'sens_ecoul', None) or getattr(detail, 'sens_ecoul', None),
+                        'type_obs': getattr(d, 'type_obs', None) or getattr(detail, 'type_obs', None),
+                        'fam_obs': getattr(d, 'fam_obs', None) or getattr(detail, 'fam_obs', None),
+                        'quan_charg': getattr(d, 'quan_charg', None) or getattr(detail, 'quan_charg', None),
+                        'rmq_obs': getattr(d, 'rmq_obs', None) or getattr(detail, 'rmq_obs', None),
+                        'orientatio': getattr(d, 'orientatio', None) or getattr(detail, 'orientatio', None),
+                        'precipitat': getattr(d, 'precipitat', None) or getattr(detail, 'precipitat', None),
+                        'photo': getattr(d, 'photo', None) or getattr(detail, 'photo', None),
+                        'video': getattr(d, 'video', None) or getattr(detail, 'video', None),
+                        'video_tps': getattr(d, 'video_tps', None) or getattr(detail, 'video_tps', None),
+                        'date_obs': getattr(d, 'date_obs', None) or getattr(detail, 'date_obs', None),
+                        'code_insee': getattr(d, 'code_insee', None) or getattr(detail, 'code_insee', None),
+                    }
+                    defects_list.append(defect)
+
+            if not defects_list:
+                self.log_info("Aucun défaut à géolocaliser.")
+                return
+
+            calc = DefectGeometryCalculator(iface=getattr(self, 'iface', None))
+
+            layer_defauts = calc.get_defect_positions(
+                defects_list,
+                layer_regard,
+                layer_collecteur,  
+                id_field_regard=(self.fieldComboBox_regard.currentText() if hasattr(self, 'fieldComboBox_regard') else 'id'),
+                id_field_collecteur=(self.fieldComboBox_collecteur.currentText() if hasattr(self, 'fieldComboBox_collecteur') else 'id')
+            )
+
+            if layer_defauts and layer_defauts.isValid():
+                layer_defauts.setName("itv_details")
+                self._remove_layers_by_names(["itv_details", "Défauts ITV"])
+                QgsProject.instance().addMapLayer(layer_defauts)
+                self._apply_qml_style(layer_defauts, 'itv_details_geom.qml')
+                self.log_info("Couche des défauts ajoutée au projet (itv_details).")
+            else:
+                self.log_info("Impossible de générer la couche des défauts.")
+
+        except Exception as e:
+            self.log_info(f"Erreur lors du calcul/affichage des défauts : {e}")
+
+    def calculate_and_show_bcht_positions(self):
+        """
+        Calcule et ajoute la couche des branchements BCA (points) en mode full Python.
+        """
+        try:
+            if not getattr(self, "details", None):
+                self.log_info("Aucune donnée ITV chargée : pas de branchements BCA à afficher.")
+                return
+
+            layer_regard = self.mapLayerComboBox_regard.currentLayer() if hasattr(self, 'mapLayerComboBox_regard') else None
+            if layer_regard is None or not layer_regard.isValid():
+                self.log_info("Couche regard non sélectionnée ou invalide.")
+                return
+
+            layer_collecteur = (
+                self.mapLayerComboBox_collecteur.currentLayer()
+                if hasattr(self, 'mapLayerComboBox_collecteur') else None
+            )
+
+            id_field_regard = (
+                self.fieldComboBox_regard.currentText()
+                if hasattr(self, 'fieldComboBox_regard') and self.fieldComboBox_regard.currentIndex() >= 0
+                else 'id'
+            )
+            id_field_collecteur = (
+                self.fieldComboBox_collecteur.currentText()
+                if hasattr(self, 'fieldComboBox_collecteur') and self.fieldComboBox_collecteur.currentIndex() >= 0
+                else 'id'
+            )
+
+            calc = BranchGeometryCalculator(iface=getattr(self, 'iface', None))
+            layer_bcht = calc.get_branch_positions(
+                self.details,
+                layer_regard,
+                layer_collecteur,
+                id_field_regard=id_field_regard,
+                id_field_collecteur=id_field_collecteur,
+            )
+
+            if layer_bcht and layer_bcht.isValid():
+                layer_bcht.setName("itv_details_bcht")
+                self._remove_layers_by_names(["itv_details_bcht"])
+                QgsProject.instance().addMapLayer(layer_bcht)
+                self._apply_qml_style(layer_bcht, 'itv_details_bcht.qml')
+                self.log_info(
+                    f"Couche des branchements ajoutée au projet (itv_details_bcht) : {layer_bcht.featureCount()} point(s)."
+                )
+            else:
+                self.log_info("Impossible de générer la couche des branchements BCA (points).")
+        except Exception as e:
+            self.log_info(f"Erreur lors du calcul/affichage des branchements BCA : {e}")
+
+    def calculate_and_show_branch_positions(self):
+        """Calcule et affiche les flèches BCA via ``BcaGeometryCalculator``.
+
+        Cette méthode est volontairement simple : elle ne fait plus appel à
+        ``BranchGeometryCalculator`` ni à une variable globale ``iface``.
+        Elle prépare uniquement les géométries QGIS puis délègue la création
+        des entités et des flèches à ``branch_lines.py``.
+        """
+        try:
+            if not getattr(self, "details", None):
+                self.log_info("Aucune donnée ITV chargée : pas de BCA à afficher.")
+                return
+
+            layer_regard = self.mapLayerComboBox_regard.currentLayer()
+            if layer_regard is None or not layer_regard.isValid():
+                self.log_info("Couche regard non sélectionnée ou invalide.")
+                return
+
+            layer_collecteur = (
+                self.mapLayerComboBox_collecteur.currentLayer()
+                if hasattr(self, "mapLayerComboBox_collecteur") else None
+            )
+
+            id_field_regard = (
+                self.fieldComboBox_regard.currentText()
+                if hasattr(self, "fieldComboBox_regard") and self.fieldComboBox_regard.currentIndex() >= 0
+                else None
+            )
+            if not id_field_regard:
+                self.log_info("Champ identifiant regard non sélectionné.")
+                return
+
+            id_field_collecteur = None
+            if layer_collecteur is not None and layer_collecteur.isValid():
+                id_field_collecteur = (
+                    self.fieldComboBox_collecteur.currentText()
+                    if hasattr(self, "fieldComboBox_collecteur") and self.fieldComboBox_collecteur.currentIndex() >= 0
+                    else None
+                )
+
+            from shapely import wkt as shapely_wkt
+
+            def to_shapely(feature):
+                geom = feature.geometry()
+                if geom is None or geom.isEmpty():
+                    return None
+                try:
+                    g = shapely_wkt.loads(geom.asWkt())
+                    if g.geom_type == "MultiPoint":
+                        return list(g.geoms)[0] if g.geoms else None
+                    if g.geom_type == "MultiLineString":
+                        return max(g.geoms, key=lambda x: x.length) if g.geoms else None
+                    if g.geom_type in ("Polygon", "MultiPolygon"):
+                        return g.centroid
+                    return g
+                except Exception:
+                    return None
+
+            def norm(v):
+                if v is None:
+                    return None
+                text = str(v).strip()
+                if not text:
+                    return None
+                return text.lstrip("0") or "0" if text.isdigit() else text.upper()
+
+            regards = {}
+            for feature in layer_regard.getFeatures():
+                try:
+                    key = norm(feature[id_field_regard])
+                except Exception:
+                    continue
+                geom = to_shapely(feature)
+                if key is not None and geom is not None and geom.geom_type == "Point":
+                    regards[key] = geom
+
+            self.log_info(f"{len(regards)} regard(s) disponibles pour les BCA.")
+
+            troncons = {}
+            if layer_collecteur is not None and layer_collecteur.isValid() and id_field_collecteur:
+                for feature in layer_collecteur.getFeatures():
+                    try:
+                        key = norm(feature[id_field_collecteur])
+                    except Exception:
+                        continue
+                    geom = to_shapely(feature)
+                    if key is not None and geom is not None:
+                        if geom.geom_type == "LineString":
+                            troncons[key] = geom
+                        elif geom.geom_type == "MultiLineString" and len(geom.geoms):
+                            troncons[key] = max(geom.geoms, key=lambda x: x.length)
+                self.log_info(f"{len(troncons)} collecteur(s) disponibles pour les BCA.")
+            else:
+                self.log_info("Couche collecteur non sélectionnée : utilisation de tronçons virtuels entre regards.")
+
+            # Compte réellement les BCA, y compris ceux portés directement par Detail.
+            nb_bca = 0
+            for detail in self.details:
+                if str(getattr(detail, "fam_obs", "")).strip().upper() == "BCA":
+                    nb_bca += 1
+                for d in getattr(detail, "defauts", None) or []:
+                    if str(getattr(d, "fam_obs", "")).strip().upper() == "BCA":
+                        nb_bca += 1
+            self.log_info(f"{nb_bca} branchement(s) BCA trouvé(s) dans les données ITV.")
+
+            if nb_bca == 0:
+                self.log_info("Aucun BCA à afficher.")
+                return
+
+            calc = BcaGeometryCalculator()
+            layer_bca = calc.create_arrow_layer(
+                self.details,
+                troncons,
+                regards,
+            )
+
+            if layer_bca is None or not layer_bca.isValid():
+                self.log_info("Impossible de créer la couche Orientation_branchement.")
+                return
+
+            # ``create_arrow_layer`` ajoute déjà la couche au projet.
+            self.log_info(
+                f"Couche Orientation_branchement ajoutée à la carte : {layer_bca.featureCount()} ligne(s)."
+            )
+            layer_bca.triggerRepaint()
+
+        except Exception as e:
+            self.log_info(f"Erreur lors du calcul/affichage des BCA : {e}")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Erreur BCA",
+                f"Impossible de créer les lignes BCA :\n{e}"
+            )
+
+
+    def calculate_and_show_inspection_geometry(self):
+        """
+        Calcule et affiche le rectangle englobant de l'inspection
+        avec un remplissage semi-transparent.
+        """
+        try:
+            inspection_gid = getattr(self, "inspection_gid", None)
+
+            if inspection_gid is None:
+                self.log_info(
+                    "Aucun identifiant d'inspection disponible."
+                )
+                return
+
+            if not hasattr(self, "details") or not self.details:
+                self.log_info(
+                    "Aucune donnée ITV chargée."
+                )
+                return
+
+            layer_regard = (
+                self.mapLayerComboBox_regard.currentLayer()
+                if hasattr(self, "mapLayerComboBox_regard")
+                else None
+            )
+
+            if not layer_regard or not layer_regard.isValid():
+                self.log_info(
+                    "Couche regard non sélectionnée ou invalide."
+                )
+                return
+
+            layer_collecteur = (
+                self.mapLayerComboBox_collecteur.currentLayer()
+                if hasattr(self, "mapLayerComboBox_collecteur")
+                else None
+            )
+
+            id_field_regard = (
+                self.fieldComboBox_regard.currentText()
+                if hasattr(self, "fieldComboBox_regard")
+                and self.fieldComboBox_regard.currentIndex() != -1
+                else "id"
+            )
+
+            id_field_collecteur = (
+                self.fieldComboBox_collecteur.currentText()
+                if hasattr(self, "fieldComboBox_collecteur")
+                and self.fieldComboBox_collecteur.currentIndex() != -1
+                else "id"
+            )
+
+            self.log_info(
+                "Calcul de la géométrie de l'inspection..."
+            )
+
+            calc = InspectionGeometryCalculator(
+                iface=getattr(self, "iface", None)
+            )
+
+            layer_inspection = calc.get_inspection_geometry(
+                inspection_gid,
+                self.details,
+                layer_regard,
+                layer_collecteur,
+                id_field_regard=id_field_regard,
+                id_field_collecteur=id_field_collecteur,
+            )
+
+            if not layer_inspection or not layer_inspection.isValid():
+                self.log_info(
+                    "Aucune géométrie d'inspection générée."
+                )
+                return
+
+            self._enrich_itv_inspection_layer_full_python(layer_inspection)
+
+            layer_inspection.setName("itv_inspection")
+
+            # ----------------------------------------------------------
+            # Style
+            # ----------------------------------------------------------
+            style_applied = self._apply_qml_style(layer_inspection, 'itv_inspection.qml')
+            if not style_applied:
+                symbol = QgsFillSymbol.createSimple({
+                    "color": "255,165,0,70",
+                    "outline_color": "255,140,0,255",
+                    "outline_width": "0.8"
+                })
+                layer_inspection.renderer().setSymbol(symbol)
+                layer_inspection.triggerRepaint()
+
+            # ----------------------------------------------------------
+            # Ajout au projet
+            # ----------------------------------------------------------
+            self._remove_layers_by_names(["itv_inspection"])
+            QgsProject.instance().addMapLayer(layer_inspection)
+
+            # ----------------------------------------------------------
+            # Zoom
+            # ----------------------------------------------------------
+            iface = getattr(self, "iface", None)
+
+            if iface is not None:
+                try:
+                    canvas = iface.mapCanvas()
+                    canvas.setExtent(layer_inspection.extent())
+                    canvas.refresh()
+                except Exception as e:
+                    self.log_info(
+                        f"Impossible de zoomer sur l'inspection : {e}"
+                    )
+
+            self.log_info(
+                "Couche inspection ajoutée au projet (itv_inspection)."
+            )
+
+        except Exception as e:
+            self.log_info(
+                f"Erreur lors du calcul de la géométrie d'inspection : {e}"
+            )
+
+
+    def calculate_bca(self):
+        """Crée réellement les flèches d'orientation des BCA dans QGIS.
+
+        Implémentation 100% Python, sans dépendance à PostgreSQL/PostGIS :
+        toute la géométrie est calculée à partir de ``self.details`` et des
+        couches QGIS (regard / collecteur) déjà chargées.
+
+        - Le BCA peut être dans ``detail.defauts`` ou directement dans
+          ``self.details``.
+        - L'orientation horaire (ex. "09h") n'est pas toujours recopiée sur
+          ``Detail.orientatio`` : dans ce cas on va la chercher dans les
+          lignes ``TableC`` (``detail.c_rows``) où ``A == "BCA"``, champ
+          ``G`` (position horaire), en faisant correspondre le métrage
+          (champ ``I``).
+        - Si aucun collecteur n'est sélectionné, le tronçon utilisé pour le
+          métrage est construit entre les deux regards du BCA.
+        - Cas particulier "12h" (ou orientation toujours inconnue) : deux
+          flèches sont créées (une à droite, une à gauche), car il est
+          impossible de déterminer le côté du branchement dans ce cas.
+        """
+        from math import atan2, cos, sin, pi
+        from shapely.geometry import Point, LineString
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import (
+            QgsFeature,
+            QgsGeometry,
+            QgsField,
+            QgsLineSymbol,
+            QgsSingleSymbolRenderer,
+            QgsArrowSymbolLayer,
+            QgsVectorLayer,
+            QgsProject,
+        )
+
+        def norm(value):
+            if value is None:
+                return None
+            text = str(value).strip()
+            if not text:
+                return None
+            if text.isdigit():
+                return text.lstrip("0") or "0"
+            return text.upper()
+
+        def qgis_to_shapely(feature):
+            geom = feature.geometry()
+            if geom is None or geom.isEmpty():
+                return None
+            try:
+                from shapely import wkt as shapely_wkt
+                g = shapely_wkt.loads(geom.asWkt())
+                if g.geom_type == "MultiPoint":
+                    return list(g.geoms)[0] if g.geoms else None
+                if g.geom_type == "MultiLineString":
+                    return max(g.geoms, key=lambda x: x.length) if g.geoms else None
+                return g
+            except Exception:
+                return None
+
+        def parse_metrage(value):
+            if value is None:
+                return None
+            try:
+                if isinstance(value, str):
+                    value = value.strip().replace(',', '.')
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def orientation_from_c_rows(detail, metrage):
+            """
+            L'orientation horaire (ex. "09h") vit dans la ligne TableC dont
+            A == "BCA", champ G (position horaire), que l'on retrouve en
+            faisant correspondre le métrage (champ I).
+            """
+            if metrage is None:
+                return None
+
+            best = None
+            best_delta = None
+
+            for row in (getattr(detail, "c_rows", None) or []):
+                if getattr(row, "A", None) != "BCA":
+                    continue
+
+                g = getattr(row, "G", None)
+                i = getattr(row, "I", None)
+                if not g or i is None:
+                    continue
+
+                row_metrage = parse_metrage(i)
+                if row_metrage is None:
+                    continue
+
+                delta = abs(row_metrage - metrage)
+                if delta > 0.5:
+                    continue
+
+                if best_delta is None or delta < best_delta:
+                    best = g
+                    best_delta = delta
+
+            if best is None:
+                return None
+
+            try:
+                hour = int(str(best).strip())
+            except (TypeError, ValueError):
+                return None
+
+            if hour == 0:
+                hour = 12
+
+            return f"{hour:02d}h"
+
+        def arrow_angles(pipe_angle, orientation, sens_ecoul=None):
+            """
+            Retourne la liste des angles (un ou deux) auxquels tracer une
+            flèche pour une orientation donnée.
+
+            Règle métier :
+            - 0h / 12h : segment bilatéral (gauche + droite).
+            - 0h..6h : un côté.
+            - 6h..12h : autre côté.
+                        - Le sens géométrique est déterminé par les regards entrée/sortie
+                            (comme dans la logique SQL d'origine).
+            """
+            raw = str(orientation or "").strip().lower().replace(" ", "")
+            if not raw:
+                return None
+
+            # En cas de plage (ex: 09h-10h), on prend la première valeur.
+            primary = raw.split("-")[0]
+            primary = primary.replace("heure", "h")
+
+            if primary.endswith("h"):
+                primary = primary[:-1]
+
+            try:
+                hour = int(primary)
+            except (TypeError, ValueError):
+                return None
+
+            hour = hour % 12
+
+            if hour == 0:
+                return [pipe_angle - pi / 2.0, pipe_angle + pi / 2.0]
+
+            # Par convention: 1..5 = droite ; 6..11 = gauche.
+            go_right = 1 <= hour <= 5
+
+            if go_right:
+                return [pipe_angle - pi / 2.0]
+            return [pipe_angle + pi / 2.0]
+
+        try:
+            if not getattr(self, "details", None):
+                self.log_info("Aucun détail ITV disponible pour les BCA.")
+                return None
+
+            layer_regard = (
+                self.mapLayerComboBox_regard.currentLayer()
+                if hasattr(self, "mapLayerComboBox_regard") else None
+            )
+            layer_collecteur = (
+                self.mapLayerComboBox_collecteur.currentLayer()
+                if hasattr(self, "mapLayerComboBox_collecteur") else None
+            )
+
+            if layer_regard is None or not layer_regard.isValid():
+                self.log_info("Aucune couche regard valide sélectionnée.")
+                return None
+
+            id_field_regard = (
+                self.fieldComboBox_regard.currentText()
+                if hasattr(self, "fieldComboBox_regard")
+                and self.fieldComboBox_regard.currentIndex() >= 0
+                else None
+            )
+            if not id_field_regard:
+                self.log_info("Champ identifiant regard non sélectionné.")
+                return None
+
+            id_field_collecteur = None
+            if layer_collecteur is not None:
+                id_field_collecteur = (
+                    self.fieldComboBox_collecteur.currentText()
+                    if hasattr(self, "fieldComboBox_collecteur")
+                    and self.fieldComboBox_collecteur.currentIndex() >= 0
+                    else None
+                )
+                if not id_field_collecteur:
+                    self.log_info("Champ identifiant collecteur non sélectionné.")
+                    return None
+
+            # ----------------------------------------------------------
+            # 1. Chargement des regards : id -> Point
+            # ----------------------------------------------------------
+            regards = {}
+            for f in layer_regard.getFeatures():
+                try:
+                    key = norm(f[id_field_regard])
+                except Exception:
+                    continue
+                if key is None:
+                    continue
+                geom = qgis_to_shapely(f)
+                if geom is None:
+                    continue
+                if geom.geom_type == "Point":
+                    regards[key] = geom
+                elif geom.geom_type in ("Polygon", "LineString"):
+                    regards[key] = geom.centroid
+
+            self.log_info(f"{len(regards)} regard(s) disponibles pour les BCA.", level="debug")
+
+            # ----------------------------------------------------------
+            # 2. Chargement des collecteurs si fournis
+            # ----------------------------------------------------------
+            troncons = {}
+            if layer_collecteur is not None:
+                for f in layer_collecteur.getFeatures():
+                    try:
+                        key = norm(f[id_field_collecteur])
+                    except Exception:
+                        continue
+                    if key is None:
+                        continue
+                    geom = qgis_to_shapely(f)
+                    if geom is None:
+                        continue
+                    if geom.geom_type == "LineString":
+                        troncons[key] = geom
+                    elif geom.geom_type == "MultiLineString" and len(geom.geoms):
+                        troncons[key] = max(geom.geoms, key=lambda x: x.length)
+                self.log_info(f"{len(troncons)} collecteur(s) disponibles pour les BCA.", level="debug")
+            else:
+                self.log_info("Aucune couche collecteur : utilisation des tronçons virtuels entre regards.", level="debug")
+
+            # ----------------------------------------------------------
+            # 3. Aplatir les BCA, avec l'orientation réelle (Detail,
+            #    défaut, ou à défaut ligne TableC "BCA" correspondante)
+            # ----------------------------------------------------------
+            bcas = []
+            for detail in self.details:
+                parent_orientation = getattr(detail, "orientatio", None)
+
+                if getattr(detail, "fam_obs", None) == "BCA":
+                    m = parse_metrage(getattr(detail, "metrage", None))
+                    o = parent_orientation or orientation_from_c_rows(detail, m)
+                    bcas.append((detail, detail, o))
+
+                for d in (getattr(detail, "defauts", None) or []):
+                    if getattr(d, "fam_obs", None) == "BCA":
+                        m = parse_metrage(getattr(d, "metrage", None))
+                        o = (
+                            getattr(d, "orientatio", None)
+                            or parent_orientation
+                            or orientation_from_c_rows(detail, m)
+                        )
+                        bcas.append((detail, d, o))
+
+            self.log_info(f"{len(bcas)} BCA trouvé(s) dans les données ITV.")
+            if not bcas:
+                self.log_info("Aucune flèche BCA à créer.")
+                return None
+
+            # ----------------------------------------------------------
+            # 4. Couche mémoire
+            # ----------------------------------------------------------
+            layer_name = "itv_details_bcht_lines"
+            for old in list(QgsProject.instance().mapLayers().values()):
+                if old.name() in (layer_name, "Orientation_branchement"):
+                    QgsProject.instance().removeMapLayer(old.id())
+
+            crs = layer_regard.crs().authid() or "EPSG:2154"
+            arrow_layer = QgsVectorLayer(
+                f"LineString?crs={crs}", layer_name, "memory"
+            )
+            if not arrow_layer.isValid():
+                raise RuntimeError("Impossible de créer la couche Orientation_branchement.")
+
+            provider = arrow_layer.dataProvider()
+            provider.addAttributes([
+                QgsField("id", QVariant.Int),
+                QgsField("code", QVariant.String),
+                QgsField("libelle", QVariant.String),
+                QgsField("orientatio", QVariant.String),
+                QgsField("sens_inspe", QVariant.String),
+                QgsField("type_mat", QVariant.String),
+                QgsField("diametre", QVariant.String),
+                QgsField("id_reg_ent", QVariant.String),
+                QgsField("id_reg_sor", QVariant.String),
+            ])
+            arrow_layer.updateFields()
+
+            features = []
+            nb_created = 0
+            nb_missing_regards = 0
+            nb_missing_orientation = 0
+            nb_invalid_geometry = 0
+            row_id = 1
+
+            # ----------------------------------------------------------
+            # 5. Une (ou deux, cas 12h/inconnue) flèche(s) par BCA
+            # ----------------------------------------------------------
+            for parent, bca, orientation in bcas:
+                id_troncon = getattr(bca, "id_troncon", None)
+                id_reg_ent = getattr(bca, "id_reg_ent", None)
+                id_reg_sor = getattr(bca, "id_reg_sor", None)
+                sens_ecoul = getattr(bca, "sens_ecoul", None) or getattr(parent, "sens_ecoul", None)
+                metrage = parse_metrage(getattr(bca, "metrage", None))
+
+                if id_reg_ent is None:
+                    id_reg_ent = getattr(parent, "id_reg_ent", None)
+                if id_reg_sor is None:
+                    id_reg_sor = getattr(parent, "id_reg_sor", None)
+                if id_troncon is None:
+                    id_troncon = getattr(parent, "id_troncon", None)
+                if metrage is None:
+                    metrage = parse_metrage(getattr(parent, "metrage", None))
+
+                if not id_reg_ent or not id_reg_sor:
+                    nb_missing_regards += 1
+                    continue
+                if norm(id_reg_ent) not in regards or norm(id_reg_sor) not in regards:
+                    nb_missing_regards += 1
+                    continue
+
+                if orientation is None or not str(orientation).strip():
+                    nb_missing_orientation += 1
+
+                p_ent = regards[norm(id_reg_ent)]
+                p_sor = regards[norm(id_reg_sor)]
+
+                line = troncons.get(norm(id_troncon)) if layer_collecteur is not None else None
+
+                if line is None:
+                    line = LineString([
+                        (p_ent.x, p_ent.y),
+                        (p_sor.x, p_sor.y),
+                    ])
+
+                if line.is_empty or line.length <= 0:
+                    nb_invalid_geometry += 1
+                    continue
+
+                if metrage is None:
+                    metrage = line.length / 2.0
+                metrage = max(0.0, min(metrage, line.length))
+
+                a = Point(line.coords[0])
+                b = Point(line.coords[-1])
+                d_forward = a.distance(p_ent) + b.distance(p_sor)
+                d_reverse = a.distance(p_sor) + b.distance(p_ent)
+                forward = d_forward <= d_reverse
+
+                if not forward:
+                    coords = list(line.coords)
+                    coords.reverse()
+                    line = LineString(coords)
+
+                obs = line.interpolate(metrage)
+
+                c0 = line.interpolate(max(0.0, metrage - 0.01))
+                c1 = line.interpolate(min(line.length, metrage + 0.01))
+                if c0.distance(c1) <= 0:
+                    c0 = Point(line.coords[0])
+                    c1 = Point(line.coords[-1])
+                pipe_angle = atan2(c1.y - c0.y, c1.x - c0.x)
+
+                angles = arrow_angles(pipe_angle, orientation, sens_ecoul=sens_ecoul)
+                if not angles:
+                    nb_missing_orientation += 1
+                    continue
+
+                for angle in angles:
+                    end = Point(
+                        obs.x + 3.0 * cos(angle),
+                        obs.y + 3.0 * sin(angle),
+                    )
+                    geom = LineString([(obs.x, obs.y), (end.x, end.y)])
+                    if geom.is_empty or geom.length <= 0:
+                        nb_invalid_geometry += 1
+                        continue
+
+                    f = QgsFeature(arrow_layer.fields())
+                    f.setGeometry(QgsGeometry.fromWkt(geom.wkt))
+                    code_obs = getattr(bca, "code_obs", None) or getattr(parent, "code_obs", None)
+                    libel_obs = getattr(bca, "libel_obs", None) or getattr(parent, "libel_obs", None)
+                    f.setAttributes([
+                        row_id,
+                        code_obs,
+                        libel_obs,
+                        str(orientation) if orientation else "12h",
+                        sens_ecoul,
+                        None,
+                        None,
+                        None if id_reg_ent is None else str(id_reg_ent),
+                        None if id_reg_sor is None else str(id_reg_sor),
+                    ])
+                    features.append(f)
+                    nb_created += 1
+                    row_id += 1
+
+            if features:
+                provider.addFeatures(features)
+            arrow_layer.updateExtents()
+
+            # ----------------------------------------------------------
+            # 6. Symbologie : vraie tête de flèche visible
+            # ----------------------------------------------------------
+            symbol = QgsLineSymbol.createSimple({
+                "color": "0,0,255,255",
+                "width": "1.2",
+            })
+            arrow_symbol = QgsArrowSymbolLayer.create({
+                "is_curved": "0",
+                "arrow_width": "2.8",
+                "arrow_start_width": "0",
+                "head_length": "4",
+                "head_thickness": "3",
+                "head_type": "0",
+                "color": "0,0,255,255",
+                "outline_color": "0,0,255,255",
+            })
+            symbol.appendSymbolLayer(arrow_symbol)
+            arrow_layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+
+            self._apply_qml_style(arrow_layer, 'itv_details_bcht_lines.qml')
+            QgsProject.instance().addMapLayer(arrow_layer)
+            arrow_layer.triggerRepaint()
+
+            # ----------------------------------------------------------
+            # 7. Log
+            # ----------------------------------------------------------
+            self.log_info(
+                f"BCA : {len(bcas)} trouvé(s), {nb_created} flèche(s) créée(s)."
+            )
+            if nb_missing_regards:
+                self.log_info(f"BCA ignorés : {nb_missing_regards} avec regard(s) introuvable(s).", level="debug")
+            if nb_missing_orientation:
+                self.log_info(
+                    f"{nb_missing_orientation} BCA sans orientation trouvée "
+                    "(ni sur le Detail, ni dans les lignes TableC "
+                    "correspondantes) : deux flèches tracées, "
+                    "droite + gauche, faute de savoir quel côté choisir."
+                , level="debug")
+            if nb_invalid_geometry:
+                self.log_info(f"BCA ignorés : {nb_invalid_geometry} avec géométrie invalide.", level="debug")
+
+            iface = getattr(self, "iface", None)
+            if iface is not None and nb_created:
+                try:
+                    iface.mapCanvas().refresh()
+                except Exception:
+                    pass
+
+            return arrow_layer
+
+        except Exception as e:
+            self.log_info(f"Erreur lors de la création des flèches BCA : {e}")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Erreur BCA",
+                f"Impossible de créer les flèches BCA :\n{e}",
+            )
+            return None
+
+    def execute(self):
+        """
+        Lance le traitement principal :
+        - Vérifie la sélection de la base
+        - Effectue chaque étape du workflow (suppression, import, calculs, affichage)
+        - Met à jour la progressBar à chaque étape clé
+        - Logue les étapes dans le textEdit_log
+        """
+        connection_params = None
+        conn = None
+
+        use_db_views = self.is_db_views_enabled()
+
+        if use_db_views:
+            connexion = self.cmbConnexionBDD.currentText()
+            if not connexion:
+                QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune connexion sélectionnée.")
+                return
+
+            connection_params = self.get_connection_params(connexion)
+            try:
+                conn = psycopg2.connect(
+                    dbname=connection_params["dbname"],
+                    user=connection_params["user"],
+                    password=connection_params["password"],
+                    host=connection_params["host"],
+                    port=connection_params["port"]
+                )
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Erreur de connexion",
+                    f"Impossible de se connecter à la base de données : {str(e)}"
+                )
+                return
+
+        error_happened = False
+        details = []
+        inspection_gid = None
+
+        try:
+            self.set_progress(0)
+            self.log_info("Début du traitement GeoITV.", True)
+
+            if use_db_views:
+                should_clear_history = True
+                if hasattr(self, 'cbClearHistory'):
+                    try:
+                        should_clear_history = self.cbClearHistory.isChecked()
+                    except Exception:
+                        should_clear_history = True
+
+                if should_clear_history:
+                    self.log_info("Réinitialisation de l'historique DB avant import.")
+                    self.clear_tables(conn)
+                else:
+                    self.log_info("Historique DB conservé (option non cochée).", level="debug")
+            self.set_progress(10)
+
+            if use_db_views:
+                self.log_info("Import de la couche regard.")
+                self.import_layer_regard(connection_params)
+            self.set_progress(20)
+
+            if use_db_views:
+                self.log_info("Import de la couche collecteur.")
+                self.import_layer_collecteur(connection_params)
+            self.set_progress(30)
+
+            if use_db_views:
+                self.log_info("Import des données du fichier TXT ITV.")
+                inspection_gid, details = self.import_txt_data(conn=conn, persist_to_db=True)
+
+                if inspection_gid is None:
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Erreur",
+                        "Impossible de récupérer l'ID de l'inspection. Vérifiez les données du fichier TXT."
+                    )
+                    error_happened = True
+                    return
+            else:
+                self.log_info("Lecture des données du fichier TXT ITV (mode full Python).")
+                inspection_gid, details = self.import_txt_data(persist_to_db=False)
+                if not details:
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Erreur",
+                        "Aucune donnée ITV exploitable n'a été extraite du fichier TXT."
+                    )
+                    error_happened = True
+                    return
+
+            self.inspection_gid = inspection_gid
+            self.details = details
+            self.set_progress(30)
+
+            if use_db_views:
+                self.log_info("Affectation des identifiants SIG.")
+                self.set_id_sig(conn, inspection_gid)
+            else:
+                self.log_info("Affectation SQL des identifiants SIG désactivée (mode full Python).")
+            self.set_progress(40)
+
+            if use_db_views:
+                self.log_info("Mise à jour des correspondances regard (si CSV fourni).")
+                self.update_ids_reg_from_csv(conn, inspection_gid)
+            else:
+                self._apply_reg_correspondance_full_python()
+            self.set_progress(50)
+
+            if use_db_views:
+                self.log_info("Mise à jour des correspondances collecteur (si CSV fourni).")
+                self.update_ids_coll_from_csv(conn, inspection_gid)
+            else:
+                self._apply_coll_correspondance_full_python()
+            self.set_progress(60)
+
+            self.log_info("Affichage des résultats (couches et tables).")
+            if use_db_views:
+                self.display_v_inspection_view(connection_params, inspection_gid)
+                self.set_progress(80)
+                self.display_v_itv_details_geom_view(connection_params, inspection_gid)
+                self.set_progress(85)
+                bcht_loaded = self.display_v_itv_details_bcht_view(connection_params, inspection_gid)
+                if not bcht_loaded:
+                    error_happened = True
+                self.set_progress(90)
+
+                if use_db_views:
+                    self.load_ids_tables(connection_params, inspection_gid)
+                self.set_progress(100)
+            else:
+                self.log_info("Chargement des vues SQL désactivé (mode full Python) : saut des affichages SQL.")
+                self.calculate_and_show_inspection_geometry()
+                self.set_progress(72)
+                self.calculate_and_show_defect_positions()
+                self.set_progress(84)
+                self.calculate_and_show_bcht_positions()
+                self.set_progress(92)
+                self.calculate_bca()
+                self.set_progress(97)
+                self.load_ids_tables_full_python()
+                self.set_progress(100)
+
+        except Exception as e:
+            error_happened = True
+            self.log_exception("Erreur lors du traitement", e)
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur inattendue lors du traitement : {e}")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            if error_happened:
+                self.log_info(
+                    "Le traitement s'est terminé, mais a rencontré une ou plusieurs erreurs.",
+                    level="warning",
+                )
+            else:
+                self.log_info("Traitement terminé avec succès.")
