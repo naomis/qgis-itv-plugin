@@ -239,6 +239,21 @@ class DefectGeometryCalculator:
         fields.append(QgsField("id_reg_ent", QVariant.Int))
         fields.append(QgsField("id_reg_sor", QVariant.Int))
         fields.append(QgsField("id_troncon", QVariant.Int))
+        fields.append(QgsField("x", QVariant.Double))
+        fields.append(QgsField("y", QVariant.Double))
+        fields.append(QgsField("n_passage", QVariant.Int))
+        fields.append(QgsField("sens_ecoul", QVariant.String))
+        fields.append(QgsField("type_obs", QVariant.String))
+        fields.append(QgsField("fam_obs", QVariant.String))
+        fields.append(QgsField("quan_charg", QVariant.String))
+        fields.append(QgsField("rmq_obs", QVariant.String))
+        fields.append(QgsField("orientatio", QVariant.String))
+        fields.append(QgsField("precipitat", QVariant.String))
+        fields.append(QgsField("photo", QVariant.String))
+        fields.append(QgsField("video", QVariant.String))
+        fields.append(QgsField("video_tps", QVariant.String))
+        fields.append(QgsField("date_obs", QVariant.String))
+        fields.append(QgsField("code_insee", QVariant.String))
 
         layer = QgsVectorLayer(f"Point?crs={crs.authid()}", layer_name, "memory")
         provider = layer.dataProvider()
@@ -317,6 +332,21 @@ class DefectGeometryCalculator:
         fields.append(QgsField("id_reg_ent", QVariant.Int))
         fields.append(QgsField("id_reg_sor", QVariant.Int))
         fields.append(QgsField("id_troncon", QVariant.Int))
+        fields.append(QgsField("x", QVariant.Double))
+        fields.append(QgsField("y", QVariant.Double))
+        fields.append(QgsField("n_passage", QVariant.Int))
+        fields.append(QgsField("sens_ecoul", QVariant.String))
+        fields.append(QgsField("type_obs", QVariant.String))
+        fields.append(QgsField("fam_obs", QVariant.String))
+        fields.append(QgsField("quan_charg", QVariant.String))
+        fields.append(QgsField("rmq_obs", QVariant.String))
+        fields.append(QgsField("orientatio", QVariant.String))
+        fields.append(QgsField("precipitat", QVariant.String))
+        fields.append(QgsField("photo", QVariant.String))
+        fields.append(QgsField("video", QVariant.String))
+        fields.append(QgsField("video_tps", QVariant.String))
+        fields.append(QgsField("date_obs", QVariant.String))
+        fields.append(QgsField("code_insee", QVariant.String))
         prov.addAttributes(fields.toList())
         mem.updateFields()
 
@@ -370,6 +400,7 @@ class DefectGeometryCalculator:
             if pt_geom is None or pt_geom.isEmpty():
                 continue 
 
+            point = pt_geom.asPoint()
             feat = QgsFeature(mem.fields())
             feat.setGeometry(pt_geom)
             feat.setAttributes([
@@ -379,7 +410,22 @@ class DefectGeometryCalculator:
                 float(d.get("metrage", 0.0)) if d.get("metrage") is not None else None,
                 d.get("id_reg_ent", None),
                 d.get("id_reg_sor", None),
-                d.get("id_troncon", None)
+                d.get("id_troncon", None),
+                point.x(),
+                point.y(),
+                d.get("n_passage", None),
+                d.get("sens_ecoul", None),
+                d.get("type_obs", None),
+                d.get("fam_obs", None),
+                d.get("quan_charg", None),
+                d.get("rmq_obs", None),
+                d.get("orientatio", None),
+                d.get("precipitat", None),
+                d.get("photo", None),
+                d.get("video", None),
+                d.get("video_tps", None),
+                d.get("date_obs", None),
+                d.get("code_insee", None),
             ])
             feats.append(feat)
 

@@ -26,6 +26,7 @@ class TableB:
     AAO: Optional[str] = None
     AAP: Optional[str] = None
     AAQ: Optional[str] = None
+    ABS: Optional[str] = None
     AAT: Optional[str] = None
     AAU: Optional[str] = None
     AAV: Optional[str] = None
@@ -41,6 +42,11 @@ class TableB:
     ACD: Optional[str] = None
     ACH: Optional[str] = None
     ACI: Optional[str] = None
+    ADA: Optional[str] = None
+    ADB: Optional[str] = None
+    ADC: Optional[str] = None
+    ADD: Optional[str] = None
+    ADE: Optional[str] = None
 
     # Référence vers le Detail parent (optionnel)
     detail: Optional["Detail"] = None

@@ -128,8 +128,6 @@ class BranchGeometryCalculator:
 
         provider.addAttributes([
             QgsField("id", QVariant.Int),
-            QgsField("inspection_gid", QVariant.Int),
-            QgsField("id_bcht", QVariant.String),
             QgsField("x", QVariant.Double),
             QgsField("y", QVariant.Double),
             QgsField("code", QVariant.String),
@@ -228,8 +226,6 @@ class BranchGeometryCalculator:
 
             feature.setAttributes([
                 row_id,
-                getattr(bca, "inspection_gid", None) or getattr(parent_detail, "inspection_gid", None),
-                None,
                 point.x(),
                 point.y(),
                 getattr(bca, "code_obs", None) or getattr(parent_detail, "code_obs", None),

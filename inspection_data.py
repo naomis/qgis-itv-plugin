@@ -487,11 +487,6 @@ class InspectionGeometryCalculator:
 
         provider.addAttributes([
             QgsField(
-                "inspection_gid",
-                QVariant.Int
-            ),
-
-            QgsField(
                 "nb_collecteurs",
                 QVariant.Int
             ),
@@ -524,7 +519,6 @@ class InspectionGeometryCalculator:
         )
 
         feature.setAttributes([
-            inspection_gid,
             nb_collecteurs,
             nb_regards,
         ])

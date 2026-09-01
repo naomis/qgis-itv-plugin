@@ -13,6 +13,10 @@ C_FIELD_CODE_OBS_B = "B"
 C_FIELD_CODE_OBS_C = "C"
 C_FIELD_ORIENTATION_G = "G"
 C_FIELD_ORIENTATION_H = "H"
+C_FIELD_QUAN_CHARG = "D"
+C_FIELD_RMQ_OBS = "F"
+C_FIELD_PHOTO = "M"
+C_FIELD_VIDEO_TPS = "N"
 
 
 class FileParser:
@@ -162,6 +166,17 @@ class FileParser:
                         current_detail.sens_ecoul = self._clean_text(
                             getattr(b_row, B01_FIELD_SENS_ECOUL, None)
                         )
+                    elif current_table_name == "#B02":
+                        current_detail.date_obs = self._clean_text(
+                            getattr(b_row, "ABF", None)
+                        )
+                        current_detail.video = self._clean_text(
+                            getattr(b_row, "ABS", None)
+                        )
+                    elif current_table_name == "#B04":
+                        current_detail.precipitat = self._clean_text(
+                            getattr(b_row, "ADA", None)
+                        )
 
                 elif current_table_name == "#C":
                     c_row = TableC()
@@ -186,6 +201,18 @@ class FileParser:
                         current_detail.fam_obs = fam_obs
                         current_detail.libel_obs = None
                         current_detail.orientatio = orientatio
+                        current_detail.quan_charg = self._clean_text(
+                            getattr(c_row, C_FIELD_QUAN_CHARG, None)
+                        )
+                        current_detail.rmq_obs = self._clean_text(
+                            getattr(c_row, C_FIELD_RMQ_OBS, None)
+                        )
+                        current_detail.photo = self._clean_text(
+                            getattr(c_row, C_FIELD_PHOTO, None)
+                        )
+                        current_detail.video_tps = self._clean_text(
+                            getattr(c_row, C_FIELD_VIDEO_TPS, None)
+                        )
 
                         defaut = DefautDetecte(
                             code_obs=code_obs,
@@ -194,6 +221,13 @@ class FileParser:
                         )
                         defaut.orientatio = orientatio
                         defaut.sens_ecoul = current_detail.sens_ecoul
+                        defaut.quan_charg = current_detail.quan_charg
+                        defaut.rmq_obs = current_detail.rmq_obs
+                        defaut.precipitat = current_detail.precipitat
+                        defaut.photo = current_detail.photo
+                        defaut.video = current_detail.video
+                        defaut.video_tps = current_detail.video_tps
+                        defaut.date_obs = current_detail.date_obs
                         current_detail.add_defaut(defaut)
 
         return {
