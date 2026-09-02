@@ -5,12 +5,12 @@
 [general]
 name=GeoITV
 qgisMinimumVersion=3.0
-description=Ce plugin QGIS géolocalise automatiquement branchements et défauts observés lors d’iune nspection télévisée (ITV) à partir du fichier TXT normé (NF EN 13508-2+A1)
-version=1.0.0
+description=Geolocates defects and lateral connections from NF EN 13508-2+A1 CCTV inspection TXT files.
+version=1.0.1
 author=NAOMIS
 email=nantes@naomis.fr
 
-about=Ce plugin QGIS permet de géolocaliser automatiquement les branchements et défauts observés lors d’une inspection télévisée (ITV) des réseaux d’assainissement, à partir de fichiers TXT conformes à la norme NF EN 13508-2+A1. Il convertit ces données non spatiales en couches SIG exploitables : emprise de l’inspection, points de branchements (avec orientation) et défauts observés. Le plugin gère la correspondance des identifiants entre ITV et SIG, traduit les codes ITV, détecte les incohérences de données, et fournit des styles QGIS prêts à l’emploi pour une cartographie immédiate. Compatible avec toutes les projections, il facilite l’intégration des inspections ITV dans le SIG communal.
+about=GeoITV geolocates defects and lateral connections observed during wastewater network CCTV inspections from TXT files compliant with NF EN 13508-2+A1. The standard FullPython mode creates QGIS memory layers for the inspection extent, defects, lateral connection points and orientations without requiring a database. It requires the Shapely Python library. The DB legacy mode requires PostgreSQL 12 or later with PostGIS 3.4 or later and uses the itv schema provided in the source repository. GeoITV supports ITV-to-GIS identifier matching, reports missing matches and pipe length differences, and provides QGIS styles for the generated layers.
 
 tracker=https://github.com/naomis/qgis-itv-plugin/issues
 repository=https://github.com/naomis/qgis-itv-plugin
@@ -19,13 +19,14 @@ repository=https://github.com/naomis/qgis-itv-plugin
 # Recommended items:
 
 hasProcessingProvider=no
-changelog=1.0.0 - Première version stable publiée.
+changelog=1.0.1 - English publication metadata and dependency information.
+	1.0.0 - First stable release.
 
 # Tags are comma separated with spaces allowed
-tags=analysis, calculator, shapefile, postgis, layers, import, export, point, csv, txt, vector, itv, locate, geolocation
+tags=sewer, wastewater, cctv inspection, geolocation, vector, postgis, shapely, import, csv, txt
 
 homepage=https://www.naomis.fr/
-category=Plugins
+category=Vector
 icon=icon.png
 # experimental flag
 experimental=False
