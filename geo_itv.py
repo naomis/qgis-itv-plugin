@@ -200,7 +200,7 @@ class GeoITV:
         # Texte principal (après logo Naomis)
         text_after_logo = (
             "<b>Conception et développement :</b> NAOMIS (<a href='https://www.naomis.fr'>www.naomis.fr</a>)<br><br>"
-            "<b>Version :</b> 1.0.1<br><br>"
+            "<b>Version :</b> 1.0.2<br><br>"
             "<div style='text-align:center;'><b>Merci à tous les contributeurs et utilisateurs de ce plugin !</b></div><br>"
             "<b>Code source :</b> <a href='https://github.com/naomis/qgis-itv-plugin'>https://github.com/naomis/qgis-itv-plugin</a><br>"
             "<b>Licence :</b> MIT License<br><br>"

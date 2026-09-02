@@ -2096,39 +2096,39 @@ ALTER TABLE ONLY itv.passage ALTER COLUMN gid SET DEFAULT nextval('itv.passage_g
 
 
 ALTER TABLE ONLY itv.ids_reg
-    ADD CONSTRAINT "PK_1a2b3c4d5e6f7g8h9i0j1k2l3m" PRIMARY KEY (gid);
+    ADD CONSTRAINT ids_reg_pkey PRIMARY KEY (gid);
 
 
 ALTER TABLE ONLY itv."C"
-    ADD CONSTRAINT "PK_4a936ec59e3abba7e9444c6cb4e" PRIMARY KEY (gid);
+    ADD CONSTRAINT c_pkey PRIMARY KEY (gid);
 
 
 ALTER TABLE ONLY itv.ids_coll
-    ADD CONSTRAINT "PK_4d5e6f7g8h9i0j1k2l3m4n5o6p" PRIMARY KEY (gid);
+    ADD CONSTRAINT ids_coll_pkey PRIMARY KEY (gid);
 
 
 ALTER TABLE ONLY itv.inspection
-    ADD CONSTRAINT "PK_520b6d6420aa39867a4ef24e560" PRIMARY KEY (gid);
+    ADD CONSTRAINT inspection_pkey PRIMARY KEY (gid);
 
 
 ALTER TABLE ONLY itv."B04"
-    ADD CONSTRAINT "PK_605881ded05f29ee81b86547cc1" PRIMARY KEY (gid);
+    ADD CONSTRAINT b04_pkey PRIMARY KEY (gid);
 
 
 ALTER TABLE ONLY itv."B02"
-    ADD CONSTRAINT "PK_9a7a5daac13f24b8e3efc42182c" PRIMARY KEY (gid);
+    ADD CONSTRAINT b02_pkey PRIMARY KEY (gid);
 
 
 ALTER TABLE ONLY itv.passage
-    ADD CONSTRAINT "PK_9f391f8e81e97c76afa2e044358" PRIMARY KEY (gid);
+    ADD CONSTRAINT passage_pkey PRIMARY KEY (gid);
 
 
 ALTER TABLE ONLY itv."B01"
-    ADD CONSTRAINT "PK_9f79f415c2fdf12ae8f44659e55" PRIMARY KEY (gid);
+    ADD CONSTRAINT b01_pkey PRIMARY KEY (gid);
 
 
 ALTER TABLE ONLY itv."B03"
-    ADD CONSTRAINT "PK_e2c43fe16299bd2e844615ca8ea" PRIMARY KEY (gid);
+    ADD CONSTRAINT b03_pkey PRIMARY KEY (gid);
 
 
 ALTER TABLE ONLY itv.code_obs
@@ -2143,19 +2143,19 @@ ALTER TABLE ONLY itv.ids_coll
     ADD CONSTRAINT unique_coll_inspection_gid_id_itv UNIQUE (inspection_gid, id_itv);
 
 
-CREATE INDEX "IDX_1a2b3c4d5e6f7g8h9i0j1k2l3m" ON itv."B01" USING btree ("AAD");
+CREATE INDEX idx_b01_aad ON itv."B01" USING btree ("AAD");
 
 
-CREATE INDEX "IDX_3e4f5g6h7i8j9k0l1m2n3o4p5q" ON itv."B02" USING btree (passage_gid);
+CREATE INDEX idx_b02_passage_gid ON itv."B02" USING btree (passage_gid);
 
 
 CREATE INDEX idx_ids_reg_inspection_gid ON itv.ids_reg USING btree (inspection_gid);
 
 
-CREATE INDEX "IDX_4n5o6p7q8r9s0t1u2v3w4x5y6z" ON itv."B01" USING btree ("AAF");
+CREATE INDEX idx_b01_aaf ON itv."B01" USING btree ("AAF");
 
 
-CREATE INDEX "IDX_520b6d6420aa39867a4ef24e56" ON itv.inspection USING btree (gid);
+CREATE INDEX idx_inspection_gid ON itv.inspection USING btree (gid);
 
 
 CREATE INDEX idx_b01_passage_gid ON itv."B01" USING btree (passage_gid);
@@ -2186,32 +2186,32 @@ CREATE INDEX "idx_C_passage_gid" ON itv."C" USING btree (passage_gid);
 
 
 ALTER TABLE ONLY itv.passage
-    ADD CONSTRAINT "FK_1d981e67e559985e4245c91f03d" FOREIGN KEY (inspection_gid) REFERENCES itv.inspection(gid) ON DELETE CASCADE;
+    ADD CONSTRAINT passage_inspection_gid_fkey FOREIGN KEY (inspection_gid) REFERENCES itv.inspection(gid) ON DELETE CASCADE;
 
 
 ALTER TABLE ONLY itv."B01"
-    ADD CONSTRAINT "FK_20a4c933a0b94722664ee65b03f" FOREIGN KEY (passage_gid) REFERENCES itv.passage(gid) ON DELETE CASCADE;
+    ADD CONSTRAINT b01_passage_gid_fkey FOREIGN KEY (passage_gid) REFERENCES itv.passage(gid) ON DELETE CASCADE;
 
 
 ALTER TABLE ONLY itv."C"
-    ADD CONSTRAINT "FK_20a4c933a0b94722664ee65b03f" FOREIGN KEY (passage_gid) REFERENCES itv.passage(gid) ON DELETE CASCADE;
+    ADD CONSTRAINT c_passage_gid_fkey FOREIGN KEY (passage_gid) REFERENCES itv.passage(gid) ON DELETE CASCADE;
 
 
 ALTER TABLE ONLY itv."B02"
-    ADD CONSTRAINT "FK_2a3c15388b8af3f9d4f8ece1eb5" FOREIGN KEY (passage_gid) REFERENCES itv.passage(gid) ON DELETE CASCADE;
+    ADD CONSTRAINT b02_passage_gid_fkey FOREIGN KEY (passage_gid) REFERENCES itv.passage(gid) ON DELETE CASCADE;
 
 
 ALTER TABLE ONLY itv.ids_reg
-    ADD CONSTRAINT "FK_3e4f5g6h7i8j9k0l1m2n3o4p5q" FOREIGN KEY (inspection_gid) REFERENCES itv.inspection(gid) ON DELETE CASCADE;
+    ADD CONSTRAINT ids_reg_inspection_gid_fkey FOREIGN KEY (inspection_gid) REFERENCES itv.inspection(gid) ON DELETE CASCADE;
 
 
 ALTER TABLE ONLY itv."B04"
-    ADD CONSTRAINT "FK_5646496fd947c2973f28ad5cd6f" FOREIGN KEY (passage_gid) REFERENCES itv.passage(gid) ON DELETE CASCADE;
+    ADD CONSTRAINT b04_passage_gid_fkey FOREIGN KEY (passage_gid) REFERENCES itv.passage(gid) ON DELETE CASCADE;
 
 
 ALTER TABLE ONLY itv.ids_coll
-    ADD CONSTRAINT "FK_8a9b0c1d2e3f4g5h6i7j8k9l0m" FOREIGN KEY (inspection_gid) REFERENCES itv.inspection(gid) ON DELETE CASCADE;
+    ADD CONSTRAINT ids_coll_inspection_gid_fkey FOREIGN KEY (inspection_gid) REFERENCES itv.inspection(gid) ON DELETE CASCADE;
 
 
 ALTER TABLE ONLY itv."B03"
-    ADD CONSTRAINT "FK_c616062b12032abe786ec91a1e1" FOREIGN KEY (passage_gid) REFERENCES itv.passage(gid) ON DELETE CASCADE;
+    ADD CONSTRAINT b03_passage_gid_fkey FOREIGN KEY (passage_gid) REFERENCES itv.passage(gid) ON DELETE CASCADE;

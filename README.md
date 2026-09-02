@@ -6,7 +6,7 @@
 
 GeoITV est un plugin QGIS open source pour géolocaliser les défauts et les branchements issus de fichiers d'inspection télévisée au format NF EN 13508-2+A1.
 
-La version 1.0.1 propose deux modes d'exécution : FullPython, le mode standard sans base de données, et DB legacy pour les organisations qui souhaitent conserver les données dans PostgreSQL/PostGIS.
+La version 1.0.2 propose deux modes d'exécution : FullPython, le mode standard sans base de données, et DB legacy pour les organisations qui souhaitent conserver les données dans PostgreSQL/PostGIS.
 
 ## Fonctionnalités
 
@@ -71,14 +71,15 @@ Créez le schéma en exécutant [resources/create_schema_itv.sql](resources/crea
 Docker est facultatif et n'est pas nécessaire au mode FullPython. Pour démarrer une base PostGIS locale depuis zéro :
 
 ```powershell
-$env:POSTGRES_PASSWORD = 'choisissez-un-mot-de-passe-solide'
 docker run --rm --name geoitv-postgis `
-  -e POSTGRES_PASSWORD `
+  --env-file .env.local `
   -e POSTGRES_DB=geoitv `
   -p 5432:5432 `
   -v geoitv-postgis-data:/var/lib/postgresql/data `
   postgis/postgis:17-3.5-alpine
 ```
+
+Avant cette commande, créez localement le fichier `.env.local` avec la variable obligatoire attendue par l'image officielle `postgis/postgis` et une valeur robuste. Ce fichier est ignoré par Git.
 
 Dans un second terminal PowerShell, créez le schéma :
 

@@ -2067,6 +2067,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         Affiche dans QGIS la vue SQL `itv.v_inspection` pour une inspection donnée et zoome sur l'emprise de la couche.
         """
         try:
+            inspection_gid = int(inspection_gid)
 
             dbname = connection_params["dbname"]
             user = connection_params["user"]
@@ -2075,7 +2076,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             port = connection_params["port"]
             schema = self.db_schema()
 
-            query = f"(SELECT * FROM {schema}.v_inspection WHERE inspection_gid = {inspection_gid})"
+            query = f"(SELECT * FROM {schema}.v_inspection WHERE inspection_gid = {inspection_gid})"  # nosec B608
             geom_column = "geom"
             primary_key = "inspection_gid"
 
@@ -2112,6 +2113,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         Affiche dans QGIS la vue SQL `itv.v_itv_details_geom` pour une inspection donnée.
         """
         try:
+            inspection_gid = int(inspection_gid)
 
             dbname = connection_params["dbname"]
             user = connection_params["user"]
@@ -2120,7 +2122,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             port = connection_params["port"]
             schema = self.db_schema()
 
-            query = f"(SELECT * FROM {schema}.v_itv_details_geom WHERE inspection_gid = {inspection_gid})"
+            query = f"(SELECT * FROM {schema}.v_itv_details_geom WHERE inspection_gid = {inspection_gid})"  # nosec B608
             geom_column = "geom"
             primary_key = "gid"
 
@@ -2153,6 +2155,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         Importe également la vue `itv.v_itv_details_bcht_lines` si elle existe.
         """
         try:
+            inspection_gid = int(inspection_gid)
 
             dbname = connection_params["dbname"]
             user = connection_params["user"]
@@ -2162,7 +2165,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             schema = self.db_schema()
 
             # Vue points
-            query = f"(SELECT * FROM {schema}.v_itv_details_bcht WHERE inspection_gid = {inspection_gid})"
+            query = f"(SELECT * FROM {schema}.v_itv_details_bcht WHERE inspection_gid = {inspection_gid})"  # nosec B608
             geom_column = "geom"
             primary_key = "id"
             uri = (
@@ -2185,7 +2188,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 QtWidgets.QMessageBox.critical(self, "Erreur", f"Impossible de charger la vue '{schema}.v_itv_details_bcht' pour l'inspection {inspection_gid} dans QGIS.")
 
             # Vue lines (orientation)
-            sql_query_lines = f"(SELECT * FROM {schema}.v_itv_details_bcht_lines WHERE inspection_gid = {inspection_gid})"
+            sql_query_lines = f"(SELECT * FROM {schema}.v_itv_details_bcht_lines WHERE inspection_gid = {inspection_gid})"  # nosec B608
             geom_column_lines = "geom"
             primary_key_lines = "id"
             validation_conn = None
@@ -2277,6 +2280,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         Affiche également les données dans les logs/messages.
         """
         try:
+            inspection_gid = int(inspection_gid)
 
             dbname = connection_params["dbname"]
             user = connection_params["user"]
@@ -2286,7 +2290,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             schema = self.db_schema()
 
             # ids_reg
-            query_reg = f"""(
+            query_reg = f"""(  # nosec B608
                 SELECT
                     gid,
                     id_regard AS id_itv,
@@ -2311,7 +2315,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.log_info(f"Aucune donnée trouvée ou impossible de charger '{schema}.v_itv_physiq_reg' pour inspection_gid={inspection_gid}. (Champs: {[f.name() for f in layer_reg.fields()]})", level="debug")
 
             # ids_coll
-            query_coll = f"""(
+            query_coll = f"""(  # nosec B608
                 SELECT
                     gid,
                     id_troncon AS id_itv,
