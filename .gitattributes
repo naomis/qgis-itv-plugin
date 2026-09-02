@@ -1,0 +1,5 @@
+# Development-only files excluded from QGIS plugin release archives.
+deploy.ps1 export-ignore
+deploy.config.example.ps1 export-ignore
+help/make.bat export-ignore
+help/Makefile export-ignore

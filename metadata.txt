@@ -6,7 +6,7 @@
 name=GeoITV
 qgisMinimumVersion=3.0
 description=Geolocates defects and lateral connections from NF EN 13508-2+A1 CCTV inspection TXT files.
-version=1.0.2
+version=1.0.3
 author=NAOMIS
 email=nantes@naomis.fr
 
@@ -19,7 +19,8 @@ repository=https://github.com/naomis/qgis-itv-plugin
 # Recommended items:
 
 hasProcessingProvider=no
-changelog=1.0.2 - Security scan remediation and public SQL cleanup.
+changelog=1.0.3 - Exclude development scripts from the plugin distribution archive.
+	1.0.2 - Security scan remediation and public SQL cleanup.
 	1.0.1 - English publication metadata and dependency information.
 	1.0.0 - First stable release.
 
