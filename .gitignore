@@ -205,6 +205,10 @@ cython_debug/
 # Local QGIS deployment settings
 deploy.config.ps1
 
+# Local release archives and security reports
+GeoITV-*.zip
+bandit-*.json
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

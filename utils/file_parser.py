@@ -97,7 +97,9 @@ class FileParser:
         content = self.get_file_content(file_path)
         lines = content.split("\n")
 
-        metadata = self.parse_metadata(lines[:6])
+        metadata = self.parse_metadata(lines)
+        if not metadata.get("delimiter"):
+            raise ValueError("Métadonnée #A3 (séparateur) absente ou invalide.")
 
         final_data: List[Dict[str, Any]] = [{"n_passage": 1, "tables": {}}]
         details: List[Detail] = [Detail(n_passage=1)]
@@ -107,7 +109,7 @@ class FileParser:
         current_table_name: Optional[str] = None
         current_columns: List[str] = []
 
-        for line in lines[6:]:
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -123,7 +125,9 @@ class FileParser:
                 continue
 
             if line.startswith("#B") or line.startswith("#C"):
-                table_name, column_string = line.split("=")
+                table_name, separator, column_string = line.partition("=")
+                if not separator:
+                    raise ValueError(f"En-tête de table invalide : {line}")
                 current_table_name = table_name
                 current_columns = [
                     col.strip()
@@ -305,7 +309,9 @@ class FileParser:
             if not line.strip():
                 continue
 
-            key, value = line.split("=")
+            key, separator, value = line.partition("=")
+            if not separator:
+                continue
             key = key.strip()
 
             if key == "#A1":
