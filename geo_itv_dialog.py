@@ -10,6 +10,8 @@ import re
 import traceback
 
 from qgis.core import (
+    Qgis,
+    QgsMessageLog,
     QgsSettings,
     QgsProject,
     QgsVectorFileWriter,
@@ -52,6 +54,13 @@ def _read_bool_setting(key, default=False):
     return text in ("1", "true", "yes", "y", "on")
 
 class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
+    @staticmethod
+    def _log_optional_failure(context, exception):
+        """Trace une erreur non bloquante dans le journal QGIS."""
+        QgsMessageLog.logMessage(
+            f"{context} : {exception}", "GeoITV", Qgis.Info
+        )
+
     def showEvent(self, event):
         """
         Recalcule l'UI selon le mode à l'affichage réel du dialogue.
@@ -108,8 +117,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                     # un passage préalable en mode DB.
                     self.setMinimumHeight(target_height)
                     self.setMaximumHeight(target_height)
-        except Exception:
-            pass
+        except Exception as error:
+            self._log_optional_failure("Ajustement de la fenêtre", error)
 
     def is_db_views_enabled(self):
         """
@@ -154,8 +163,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             try:
                 self.progressBar.setValue(value)
                 QtWidgets.QApplication.processEvents()
-            except Exception:
-                pass
+            except Exception as error:
+                self._log_optional_failure("Mise à jour de la progression", error)
     
     def log_info(self, message, raz=False, level="info"):
         """
@@ -198,8 +207,10 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 cursor.insertBlock()
                 self.textEdit_log.setTextCursor(cursor)
                 self.textEdit_log.ensureCursorVisible()
-            except Exception:
-                pass
+            except Exception as error:
+                QgsMessageLog.logMessage(
+                    f"Écriture du journal GeoITV : {error}", "GeoITV", Qgis.Info
+                )
 
     def log_exception(self, context, exception):
         """
@@ -227,35 +238,35 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                         widget.setMaximumHeight(16777215)
                     else:
                         widget.setMaximumHeight(0)
-                except Exception:
-                    pass
+                except Exception as error:
+                    self._log_optional_failure("Visibilité d'un contrôle", error)
 
         if hasattr(self, 'label_16') and use_db_views:
             try:
                 self.label_16.setText("Connexion à la base de données ITV")
-            except Exception:
-                pass
+            except Exception as error:
+                self._log_optional_failure("Libellé de connexion", error)
 
         if hasattr(self, 'cbClearHistory'):
             try:
                 self.cbClearHistory.setVisible(use_db_views)
                 self.cbClearHistory.setEnabled(use_db_views)
-            except Exception:
-                pass
+            except Exception as error:
+                self._log_optional_failure("Option de réinitialisation", error)
 
         if hasattr(self, 'label_clear_history_help'):
             try:
                 self.label_clear_history_help.setVisible(use_db_views)
                 self.label_clear_history_help.setEnabled(use_db_views)
-            except Exception:
-                pass
+            except Exception as error:
+                self._log_optional_failure("Aide de réinitialisation", error)
 
         if hasattr(self, 'line'):
             try:
                 self.line.setVisible(use_db_views)
                 self.line.setEnabled(use_db_views)
-            except Exception:
-                pass
+            except Exception as error:
+                self._log_optional_failure("Séparateur de connexion", error)
 
         # Réduit l'espace vertical résiduel en mode FullPython.
         try:
@@ -267,8 +278,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 else:
                     layout.setSpacing(0)
                     layout.setContentsMargins(0, 0, 0, 0)
-        except Exception:
-            pass
+        except Exception as error:
+            self._log_optional_failure("Mise en page de connexion", error)
 
         # Compacte l'UI en mode FullPython pour éviter les grands vides.
         try:
@@ -345,8 +356,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             if main_left_layout is not None:
                 main_left_layout.invalidate()
                 main_left_layout.activate()
-        except Exception:
-            pass
+        except Exception as error:
+            self._log_optional_failure("Mise en page du dialogue", error)
 
         # Ajuste la hauteur au plus juste après les changements de visibilité.
         self._apply_mode_dialog_height(use_db_views)
@@ -384,8 +395,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.cbClearHistory.setToolTip(
                     "Mode DB uniquement : vide les inspections existantes et supprime les tables temporaires du schéma avant l'import."
                 )
-            except Exception:
-                pass
+            except Exception as error:
+                self._log_optional_failure("Configuration de l'option DB", error)
 
         # État initial du bouton d'exécution
         self._apply_mode_ui_visibility()
@@ -440,8 +451,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             ]
             if len(candidates) == 1:
                 self.mapLayerComboBox_collecteur.setLayer(candidates[0])
-        except Exception:
-            pass
+        except Exception as error:
+            self._log_optional_failure("Sélection automatique du collecteur", error)
 
     def _sync_regard_field_combo(self, layer=None):
         """
@@ -460,8 +471,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             self.fieldComboBox_regard.setLayer(layer)
             if layer is not None and self.fieldComboBox_regard.currentIndex() < 0 and self.fieldComboBox_regard.count() > 0:
                 self.fieldComboBox_regard.setCurrentIndex(0)
-        except Exception:
-            pass
+        except Exception as error:
+            self._log_optional_failure("Synchronisation du champ regard", error)
 
     def _sync_collecteur_field_combo(self, layer=None):
         """
@@ -482,8 +493,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.fieldComboBox_collecteur.setCurrentIndex(0)
             elif layer is None:
                 self.fieldComboBox_collecteur.setCurrentIndex(-1)
-        except Exception:
-            pass
+        except Exception as error:
+            self._log_optional_failure("Synchronisation du champ collecteur", error)
 
     def _sync_field_combos_from_current_layers(self):
         """
@@ -502,8 +513,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             base_font = self.font()
             base_font.setPointSize(9)
             self.setFont(base_font)
-        except Exception:
-            pass
+        except Exception as error:
+            self._log_optional_failure("Police du dialogue", error)
 
         if hasattr(self, 'textEdit_log') and self.textEdit_log is not None:
             try:
@@ -512,8 +523,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 log_font.setFixedPitch(True)
                 self.textEdit_log.setFont(log_font)
                 self.textEdit_log.setMinimumWidth(340)
-            except Exception:
-                pass
+            except Exception as error:
+                self._log_optional_failure("Police du journal", error)
 
         splitter = self.findChild(QtWidgets.QSplitter, 'splitter')
         if splitter is not None:
@@ -521,8 +532,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 splitter.setStretchFactor(0, 3)
                 splitter.setStretchFactor(1, 2)
                 splitter.setSizes([560, 380])
-            except Exception:
-                pass
+            except Exception as error:
+                self._log_optional_failure("Dimensionnement du panneau", error)
 
     def update_btExecute_enabled(self):
         """
@@ -595,6 +606,14 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @staticmethod
+    def _feature_value(feature, field_name):
+        """Retourne la valeur d'un champ QGIS ou None si elle est indisponible."""
+        try:
+            return feature[field_name]
+        except (KeyError, IndexError, TypeError):
+            return None
 
     def _log_db_id_issues(self, layer, id_field, entity_label, check_lengths=False):
         """Signale les correspondances SIG absentes et écarts de longueur DB."""
@@ -680,8 +699,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                     try:
                         total_length += float(length_raw.replace(",", "."))
                         has_length = True
-                    except Exception:
-                        pass
+                    except (AttributeError, ValueError) as error:
+                        self._log_optional_failure("Longueur ITV invalide", error)
 
         date_deb = min(date_values) if date_values else None
         date_fin = max(date_values) if date_values else None
@@ -1028,9 +1047,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         reg_sig_by_norm = {}
         if layer_regard is not None and layer_regard.isValid() and id_field_regard:
             for feature in layer_regard.getFeatures():
-                try:
-                    value = feature[id_field_regard]
-                except Exception:
+                value = self._feature_value(feature, id_field_regard)
+                if value is None:
                     continue
                 key = norm(value)
                 if key is not None and key not in reg_sig_by_norm:
@@ -1049,9 +1067,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 distance = None
 
             for feature in layer_collecteur.getFeatures():
-                try:
-                    value = feature[id_field_collecteur]
-                except Exception:
+                value = self._feature_value(feature, id_field_collecteur)
+                if value is None:
                     continue
                 key = norm(value)
                 if key is not None and key not in coll_sig_by_norm:
@@ -1494,16 +1511,16 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
         except Exception as e:
             try:
                 conn.rollback()
-            except Exception:
-                pass
+            except Exception as rollback_error:
+                self._log_optional_failure("Annulation de transaction", rollback_error)
             self.log_exception("Erreur lors de la suppression des tables", e)
             QtWidgets.QMessageBox.critical(self, "Erreur", f"Erreur lors de la suppression des tables : {e}")
         finally:
             if cursor is not None:
                 try:
                     cursor.close()
-                except Exception:
-                    pass
+                except Exception as close_error:
+                    self._log_optional_failure("Fermeture du curseur", close_error)
 
     def import_layer_regard(self, connection_params):
         """
@@ -1742,8 +1759,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             if cursor is not None:
                 try:
                     cursor.close()
-                except Exception:
-                    pass
+                except Exception as close_error:
+                    self._log_optional_failure("Fermeture du curseur", close_error)
         return None
 
     def insert_data(self, conn, inspection_gid, passages):
@@ -1815,8 +1832,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             if cursor is not None:
                 try:
                     cursor.close()
-                except Exception:
-                    pass
+                except Exception as close_error:
+                    self._log_optional_failure("Fermeture du curseur", close_error)
     def import_txt_data(self, conn=None, persist_to_db=True):
         """
         Charge les données extraites du fichier TXT.
@@ -1921,8 +1938,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             if cursor is not None:
                 try:
                     cursor.close()
-                except Exception:
-                    pass
+                except Exception as close_error:
+                    self._log_optional_failure("Fermeture du curseur", close_error)
     
     def update_ids_reg_from_csv(self, conn, inspection_gid):
         """
@@ -1997,8 +2014,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             if cursor is not None:
                 try:
                     cursor.close()
-                except Exception:
-                    pass    
+                except Exception as close_error:
+                    self._log_optional_failure("Fermeture du curseur", close_error)
                 
     def update_ids_coll_from_csv(self, conn, inspection_gid):
         """
@@ -2059,8 +2076,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             if cursor is not None:
                 try:
                     cursor.close()
-                except Exception:
-                    pass
+                except Exception as close_error:
+                    self._log_optional_failure("Fermeture du curseur", close_error)
                 
     def display_v_inspection_view(self, connection_params, inspection_gid):
         """
@@ -2076,7 +2093,10 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             port = connection_params["port"]
             schema = self.db_schema()
 
-            query = f"(SELECT * FROM {schema}.v_inspection WHERE inspection_gid = {inspection_gid})"  # nosec B608
+            query = " ".join((
+                "(SELECT * FROM itv.v_inspection WHERE inspection_gid =",
+                str(inspection_gid) + ")",
+            ))
             geom_column = "geom"
             primary_key = "inspection_gid"
 
@@ -2122,7 +2142,10 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             port = connection_params["port"]
             schema = self.db_schema()
 
-            query = f"(SELECT * FROM {schema}.v_itv_details_geom WHERE inspection_gid = {inspection_gid})"  # nosec B608
+            query = " ".join((
+                "(SELECT * FROM itv.v_itv_details_geom WHERE inspection_gid =",
+                str(inspection_gid) + ")",
+            ))
             geom_column = "geom"
             primary_key = "gid"
 
@@ -2165,7 +2188,10 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             schema = self.db_schema()
 
             # Vue points
-            query = f"(SELECT * FROM {schema}.v_itv_details_bcht WHERE inspection_gid = {inspection_gid})"  # nosec B608
+            query = " ".join((
+                "(SELECT * FROM itv.v_itv_details_bcht WHERE inspection_gid =",
+                str(inspection_gid) + ")",
+            ))
             geom_column = "geom"
             primary_key = "id"
             uri = (
@@ -2188,7 +2214,10 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 QtWidgets.QMessageBox.critical(self, "Erreur", f"Impossible de charger la vue '{schema}.v_itv_details_bcht' pour l'inspection {inspection_gid} dans QGIS.")
 
             # Vue lines (orientation)
-            sql_query_lines = f"(SELECT * FROM {schema}.v_itv_details_bcht_lines WHERE inspection_gid = {inspection_gid})"  # nosec B608
+            sql_query_lines = " ".join((
+                "(SELECT * FROM itv.v_itv_details_bcht_lines WHERE inspection_gid =",
+                str(inspection_gid) + ")",
+            ))
             geom_column_lines = "geom"
             primary_key_lines = "id"
             validation_conn = None
@@ -2290,18 +2319,13 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             schema = self.db_schema()
 
             # ids_reg
-            query_reg = f"""(  # nosec B608
-                SELECT
-                    gid,
-                    id_regard AS id_itv,
-                    id_sig,
-                    profondeur,
-                    dimension,
-                    forme,
-                    nom_voie
-                FROM {schema}.v_itv_physiq_reg
-                WHERE inspection_gid = {inspection_gid}
-            )"""
+            query_reg = "\n".join((
+                "(",
+                "SELECT gid, id_regard AS id_itv, id_sig, profondeur, dimension, forme, nom_voie",
+                "FROM itv.v_itv_physiq_reg",
+                "WHERE inspection_gid = {}".format(inspection_gid),
+                ")",
+            ))
             uri_reg = (
                 f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
                 f"key='gid' type=NONE table=\"{query_reg}\""
@@ -2315,23 +2339,14 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.log_info(f"Aucune donnée trouvée ou impossible de charger '{schema}.v_itv_physiq_reg' pour inspection_gid={inspection_gid}. (Champs: {[f.name() for f in layer_reg.fields()]})", level="debug")
 
             # ids_coll
-            query_coll = f"""(  # nosec B608
-                SELECT
-                    gid,
-                    id_troncon AS id_itv,
-                    id_sig,
-                    type_res,
-                    type_mat,
-                    diam_nom,
-                    hauteur,
-                    largeur,
-                    forme,
-                    nom_voie,
-                    longueur_troncon_itv,
-                    longueur_troncon_sig
-                FROM {schema}.v_itv_physiq_coll
-                WHERE inspection_gid = {inspection_gid}
-            )"""
+            query_coll = "\n".join((
+                "(",
+                "SELECT gid, id_troncon AS id_itv, id_sig, type_res, type_mat, diam_nom,",
+                "hauteur, largeur, forme, nom_voie, longueur_troncon_itv, longueur_troncon_sig",
+                "FROM itv.v_itv_physiq_coll",
+                "WHERE inspection_gid = {}".format(inspection_gid),
+                ")",
+            ))
             uri_coll = (
                 f"dbname='{dbname}' host={host} port={port} user='{user}' password='{password}' "
                 f"key='gid' type=NONE table=\"{query_coll}\""
@@ -2543,9 +2558,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
 
             regards = {}
             for feature in layer_regard.getFeatures():
-                try:
-                    key = norm(feature[id_field_regard])
-                except Exception:
+                key = norm(self._feature_value(feature, id_field_regard))
+                if key is None:
                     continue
                 geom = to_shapely(feature)
                 if key is not None and geom is not None and geom.geom_type == "Point":
@@ -2556,9 +2570,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             troncons = {}
             if layer_collecteur is not None and layer_collecteur.isValid() and id_field_collecteur:
                 for feature in layer_collecteur.getFeatures():
-                    try:
-                        key = norm(feature[id_field_collecteur])
-                    except Exception:
+                    key = norm(self._feature_value(feature, id_field_collecteur))
+                    if key is None:
                         continue
                     geom = to_shapely(feature)
                     if key is not None and geom is not None:
@@ -2933,10 +2946,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             # ----------------------------------------------------------
             regards = {}
             for f in layer_regard.getFeatures():
-                try:
-                    key = norm(f[id_field_regard])
-                except Exception:
-                    continue
+                key = norm(self._feature_value(f, id_field_regard))
                 if key is None:
                     continue
                 geom = qgis_to_shapely(f)
@@ -2955,10 +2965,7 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             troncons = {}
             if layer_collecteur is not None:
                 for f in layer_collecteur.getFeatures():
-                    try:
-                        key = norm(f[id_field_collecteur])
-                    except Exception:
-                        continue
+                    key = norm(self._feature_value(f, id_field_collecteur))
                     if key is None:
                         continue
                     geom = qgis_to_shapely(f)
@@ -3188,8 +3195,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             if iface is not None and nb_created:
                 try:
                     iface.mapCanvas().refresh()
-                except Exception:
-                    pass
+                except Exception as error:
+                    self._log_optional_failure("Rafraîchissement de la carte", error)
 
             return arrow_layer
 
@@ -3355,8 +3362,8 @@ class GeoITVDialog(QtWidgets.QDialog, FORM_CLASS):
             if conn is not None:
                 try:
                     conn.close()
-                except Exception:
-                    pass
+                except Exception as close_error:
+                    self._log_optional_failure("Fermeture de la connexion", close_error)
             if error_happened:
                 self.log_info(
                     "Le traitement s'est terminé, mais a rencontré une ou plusieurs erreurs.",

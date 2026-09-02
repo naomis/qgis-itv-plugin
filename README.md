@@ -6,7 +6,7 @@
 
 GeoITV est un plugin QGIS open source pour géolocaliser les défauts et les branchements issus de fichiers d'inspection télévisée au format NF EN 13508-2+A1.
 
-La version 1.0.3 propose deux modes d'exécution : FullPython, le mode standard sans base de données, et DB legacy pour les organisations qui souhaitent conserver les données dans PostgreSQL/PostGIS.
+La version 1.0.4 propose deux modes d'exécution : FullPython, le mode standard sans base de données, et DB legacy pour les organisations qui souhaitent conserver les données dans PostgreSQL/PostGIS.
 
 ## Fonctionnalités
 

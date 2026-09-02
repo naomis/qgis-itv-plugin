@@ -200,7 +200,7 @@ class GeoITV:
         # Texte principal (après logo Naomis)
         text_after_logo = (
             "<b>Conception et développement :</b> NAOMIS (<a href='https://www.naomis.fr'>www.naomis.fr</a>)<br><br>"
-            "<b>Version :</b> 1.0.3<br><br>"
+            "<b>Version :</b> 1.0.4<br><br>"
             "<div style='text-align:center;'><b>Merci à tous les contributeurs et utilisateurs de ce plugin !</b></div><br>"
             "<b>Code source :</b> <a href='https://github.com/naomis/qgis-itv-plugin'>https://github.com/naomis/qgis-itv-plugin</a><br>"
             "<b>Licence :</b> MIT License<br><br>"
@@ -279,12 +279,9 @@ class GeoITV:
 
         dlg = QDialog(self.iface.mainWindow())
         dlg.setWindowTitle("Configuration GeoITV")
-        try:
-            font = dlg.font()
-            font.setPointSize(9)
-            dlg.setFont(font)
-        except Exception:
-            pass
+        font = dlg.font()
+        font.setPointSize(9)
+        dlg.setFont(font)
         dlg.setStyleSheet(
             "QLabel { font-size: 9pt; }"
             "QCheckBox { font-size: 9pt; }"
@@ -353,10 +350,7 @@ class GeoITV:
             )
 
             if hasattr(self, "dlg") and self.dlg is not None:
-                try:
-                    self.dlg.refresh_mode_ui()
-                except Exception:
-                    pass
+                self.dlg.refresh_mode_ui()
 
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""

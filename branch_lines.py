@@ -8,6 +8,8 @@ from shapely import Point, LineString
 from qgis.PyQt.QtCore import QVariant
 
 from qgis.core import (
+    Qgis,
+    QgsMessageLog,
     QgsProject,
     QgsVectorLayer,
     QgsFeature,
@@ -88,25 +90,10 @@ class BcaGeometryCalculator:
         if obj is None:
             return False
 
-        fam_obs = getattr(obj, "fam_obs", None)
-
-        if fam_obs is not None:
-            try:
-                if str(fam_obs).strip().upper() == "BCA":
-                    return True
-            except Exception:
-                pass
-
-        fam_obs = getattr(obj, "fam_obs", None)
-
-        if fam_obs is not None:
-            try:
-                if str(fam_obs).strip().upper() == "BCA":
-                    return True
-            except Exception:
-                pass
-
-        return False
+        try:
+            return str(getattr(obj, "fam_obs", "")).strip().upper() == "BCA"
+        except (AttributeError, TypeError, ValueError):
+            return False
 
     # ==========================================================
     # EXTRACTION DES BCA
@@ -149,10 +136,7 @@ class BcaGeometryCalculator:
                 if self._is_bca(defaut):
 
                     # On garde le lien vers le Detail parent.
-                    try:
-                        defaut._bca_parent_detail = detail
-                    except Exception:
-                        pass
+                    defaut._bca_parent_detail = detail
 
                     result.append(defaut)
 
@@ -423,10 +407,7 @@ class BcaGeometryCalculator:
                 # Stockage
                 # --------------------------------------------------
 
-                try:
-                    bca.geometry = geometry
-                except Exception:
-                    pass
+                bca.geometry = geometry
 
                 # --------------------------------------------------
                 # Feature QGIS
@@ -507,10 +488,12 @@ class BcaGeometryCalculator:
 
                 features.append(feature)
 
-            except Exception:
+            except Exception as error:
                 # Un BCA défectueux ne doit pas empêcher
                 # les autres BCA d'être créés.
-                continue
+                QgsMessageLog.logMessage(
+                    f"BCA ignoré : {error}", "GeoITV", Qgis.Warning
+                )
 
         # ======================================================
         # AJOUT DES FEATURES

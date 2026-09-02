@@ -188,8 +188,8 @@ class DefectGeometryCalculator:
                 multi_line = qgs_geom.asMultiPolyline()
                 if multi_line and len(multi_line) > 0:
                     return LineString([(pt.x(), pt.y()) for pt in multi_line[0]])
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError):
+            return None
         return None
 
     def calculate_defects_geometry(
