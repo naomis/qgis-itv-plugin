@@ -5,12 +5,37 @@
 [general]
 name=GeoITV
 qgisMinimumVersion=3.0
-description=Geolocates defects and lateral connections from NF EN 13508-2+A1 CCTV inspection TXT files.
-version=1.0.5
+description=[FR]GeoITV géolocalise les défauts et branchements observés lors des inspections télévisées (ITV) des réseaux d'assainissement en France à partir des fichiers TXT conformes à la norme NF EN 13508-2+A1.[EN]GeoITV geolocates defects and lateral connections from French wastewater network CCTV inspections using TXT files compliant with the NF EN 13508-2+A1 standard.
+version=1.0.6
 author=NAOMIS
 email=nantes@naomis.fr
 
-about=GeoITV geolocates defects and lateral connections observed during wastewater network CCTV inspections from TXT files compliant with NF EN 13508-2+A1. The standard FullPython mode creates QGIS memory layers for the inspection extent, defects, lateral connection points and orientations without requiring a database. It requires the Shapely Python library. The DB legacy mode requires PostgreSQL 12 or later with PostGIS 3.4 or later and uses the itv schema provided in the source repository. GeoITV supports ITV-to-GIS identifier matching, reports missing matches and pipe length differences, and provides QGIS styles for the generated layers.
+about=[FR]GeoITV France - ITV NF EN 13508-2+A1 est un plugin QGIS open source destiné aux gestionnaires de réseaux d'assainissement français.
+	Il permet de géolocaliser les défauts et branchements observés lors des inspections télévisées (ITV) à partir de fichiers TXT conformes à la norme française NF EN 13508-2+A1.
+	Fonctionnalités principales :
+	• Géolocalisation des défauts, branchements et emprise d'inspection
+	• Correspondance entre identifiants ITV et données SIG
+	• Calcul de l'orientation des branchements
+	• Détection des incohérences de longueur
+	• Mode autonome QGIS (sans base de données)
+	• Mode PostgreSQL/PostGIS pour les architectures historiques
+	Ce projet a été réalisé dans le cadre du programme GÉOPAL, financé par la Région Pays de la Loire.
+	Développement : NAOMIS
+	Programme GÉOPAL : https://www.geopal.org
+	Région Pays de la Loire : https://www.paysdelaloire.fr
+	[EN]GeoITV - French CCTV Inspection Geolocation is an open-source QGIS plugin designed for French wastewater network operators.
+	It geolocates defects and lateral connections detected during CCTV inspections from TXT files compliant with the French NF EN 13508-2+A1 standard.
+	Main features:
+	• Geolocation of defects, lateral connections and inspection extent
+	• ITV-to-GIS identifier matching
+	• Lateral connection orientation computation
+	• Detection of pipe length inconsistencies
+	• Standalone QGIS mode (no database required)
+	• PostgreSQL/PostGIS legacy mode
+	This project was developed as part of the GÉOPAL programme funded by the Pays de la Loire Region (France).
+	Development: NAOMIS
+	GÉOPAL programme: https://www.geopal.org
+	Pays de la Loire Region: https://www.paysdelaloire.fr
 
 tracker=https://github.com/naomis/qgis-itv-plugin/issues
 repository=https://github.com/naomis/qgis-itv-plugin
@@ -19,7 +44,8 @@ repository=https://github.com/naomis/qgis-itv-plugin
 # Recommended items:
 
 hasProcessingProvider=no
-changelog=1.0.5 - Support TXT files with preamble lines and metadata values containing equals signs.
+changelog=1.0.6 - Fix plugin load failure on Python 3.9 (QGIS <= 3.34) caused by PEP 604 union type hints.
+	1.0.5 - Support TXT files with preamble lines and metadata values containing equals signs.
 	1.0.4 - Address Bandit security scan findings.
 	1.0.3 - Exclude development scripts from the plugin distribution archive.
 	1.0.2 - Security scan remediation and public SQL cleanup.
@@ -27,7 +53,7 @@ changelog=1.0.5 - Support TXT files with preamble lines and metadata values cont
 	1.0.0 - First stable release.
 
 # Tags are comma separated with spaces allowed
-tags=sewer, wastewater, cctv inspection, geolocation, vector, postgis, shapely, import, csv, txt
+tags="pays de la loire", assainissement, cctv, france, french, geolocation, geopal, géolocalisation, import, itv, naomis, nf-en-13508, postgis, sewer, shapely, txt, vector, wastewater
 
 homepage=https://www.naomis.fr/
 category=Vector

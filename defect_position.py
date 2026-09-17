@@ -16,6 +16,7 @@ from qgis.core import (
 )
 from PyQt5.QtCore import QVariant
 from shapely.geometry import Point, LineString, MultiLineString
+from typing import Optional
 import math
 
 class DefectGeometryCalculator:
@@ -68,7 +69,7 @@ class DefectGeometryCalculator:
 
         return geometries
 
-    def interpolate_point_along_line(self, line: LineString, metrage: float) -> Point | None:
+    def interpolate_point_along_line(self, line: LineString, metrage: float) -> Optional[Point]:
         """
         Interpole un point sur une LineString à une distance `metrage` depuis le début.
         Args:
@@ -90,7 +91,7 @@ class DefectGeometryCalculator:
         ratio = metrage / line_length
         return line.interpolate(ratio)
 
-    def interpolate_point_between_points(self, point1: Point, point2: Point, metrage: float) -> Point | None:
+    def interpolate_point_between_points(self, point1: Point, point2: Point, metrage: float) -> Optional[Point]:
         """
         Interpole un point entre deux points à une distance `metrage` depuis point1.
         Args:
@@ -171,7 +172,7 @@ class DefectGeometryCalculator:
 
         return defect
 
-    def _qgs_geometry_to_shapely_line(self, qgs_geom: QgsGeometry) -> LineString | None:
+    def _qgs_geometry_to_shapely_line(self, qgs_geom: QgsGeometry) -> Optional[LineString]:
         """
         Convertit une QgsGeometry en LineString Shapely.
         Args:
